@@ -23,9 +23,10 @@ jobs:
         with:
           node-version: '20'
 
-      # Niente package-lock.json nel repo, quindi npm install e non npm ci.
+      # package-lock.json e' versionato: npm ci installa le versioni esatte del lock,
+      # cosi' la build e' riproducibile e non cambia sotto i piedi a ogni patch release.
       - name: Installa le dipendenze
-        run: npm install --no-audit --no-fund
+        run: npm ci --no-audit --no-fund
 
       # Il main process non viene mai eseguito durante il packaging: senza questo
       # passo un errore di sintassi finirebbe dritto dentro l'installer.
