@@ -27,6 +27,11 @@ jobs:
       - name: Installa le dipendenze
         run: npm install --no-audit --no-fund
 
+      # Il main process non viene mai eseguito durante il packaging: senza questo
+      # passo un errore di sintassi finirebbe dritto dentro l'installer.
+      - name: Controllo di sintassi
+        run: node --check main.js
+
       - name: Compila l'installer NSIS
         run: npx electron-builder --win nsis --x64 --publish never
 
