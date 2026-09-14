@@ -102,12 +102,14 @@ Questi punti sono tracciati nella roadmap di miglioramento.
 Il workflow [.github/workflows/build.yml](.github/workflows/build.yml) compila l'installer NSIS su un
 runner Windows di GitHub, quindi non serve avere Node.js sul PC locale.
 
-- **Release**:  -> compila e allega  alla release del tag.
-- **Prova**: Actions -> "Build installer" -> *Run workflow* -> l'exe resta come artifact per 90 giorni.
+- **Release**: `git tag v1.7.0 && git push origin v1.7.0` → compila e allega `UniFi_Monitor_1.7.0.exe`
+  alla release del tag.
+- **Prova**: Actions → "Build installer" → *Run workflow* → l'exe resta come artifact per 90 giorni.
 
+## Roadmap
 
-
-Vedi [ROADMAP.md](ROADMAP.md) per i miglioramenti pianificati.
+Vedi [ROADMAP.md](ROADMAP.md): analisi comparata con `digital195/unifi-protect-viewer` e audit di
+`main.js`. 139 proposte generate, 67 confermate da doppia verifica avversariale.
 
 ## Licenza
 
