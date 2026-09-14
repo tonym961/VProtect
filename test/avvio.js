@@ -23,7 +23,7 @@ function ok(nome, condizione, dettaglio) {
 // Config di partenza: password ancora in chiaro (come le installazioni 1.7.x) e una vista
 // verso una porta chiusa, cosi' si esercita anche il ramo did-fail-load.
 const viste = {};
-for (let i = 0; i <= 9; i++) viste[i] = { nome: 'Vista ' + i, url: 'http://127.0.0.1:9/', attiva: i < 3 };
+for (let i = 0; i <= 9; i++) viste[i] = { nome: 'Vista ' + i, url: 'http://127.0.0.1:49999/', attiva: i < 3 };
 fs.writeFileSync(configPath, JSON.stringify({
   passwordApp: 'vecchiaPassword',
   viste,
@@ -42,7 +42,7 @@ figlio.stdout.on('data', () => {});
 setTimeout(() => {
   spawnSync('taskkill', ['/pid', String(figlio.pid), '/T', '/F'], { stdio: 'ignore' });
   setTimeout(verifica, 1500);
-}, 12000);
+}, 20000);
 
 function verifica() {
   const log = fs.existsSync(logPath) ? fs.readFileSync(logPath, 'utf8') : '';
@@ -55,6 +55,11 @@ function verifica() {
   ok('passwordHash e salt scritti', typeof cfg.passwordHash === 'string' && cfg.passwordHash.length === 64 && typeof cfg.passwordSalt === 'string' && cfg.passwordSalt.length === 32);
   ok('host irraggiungibile: scatta il recupero', log.includes('caricamento fallito'), 'log:\n' + log);
   ok('il recupero programma un nuovo tentativo', /riprovo fra \d+s/.test(log));
+  // Il primo tentativo deve DAVVERO ripartire: solo "riprovo fra 5s" nel log non prova nulla,
+  // quella riga viene scritta prima di armare il timer. Serve una seconda caduta.
+  const cadute = (log.match(/caricamento fallito/g) || []).length;
+  ok('il tentativo successivo parte davvero', cadute >= 2, 'cadute registrate: ' + cadute + '\nlog:\n' + log);
+  ok('il backoff raddoppia', /riprovo fra 10s/.test(log), 'log:\n' + log);
 
   const righeSospette = stderr.split('\n').filter(r =>
     /deprecat|Uncaught|UnhandledPromiseRejection|TypeError|ReferenceError|is not a function|Cannot read/i.test(r));

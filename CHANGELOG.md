@@ -1,5 +1,34 @@
 # Changelog
 
+## 1.9.1 — il recupero automatico non ripartiva
+
+**Bug bloccante, presente dalla 1.7.1.** Quando il controller non risponde il programma mostra lo
+sfondo e programma un nuovo tentativo con backoff 5 → 10 → 20 → 40 → 60 secondi. Quel tentativo
+**non è mai partito**: Chromium emette `did-finish-load` anche per la navigazione *fallita*, perché
+committa la propria pagina di errore, e `getURL()` resta l'indirizzo http originale. Il nostro
+handler lo scambiava per un caricamento riuscito e chiamava `annullaRetry()` cinque millisecondi
+dopo aver armato il timer. Su una parete video significa che al primo controller irraggiungibile lo
+sfondo restava lì per sempre, finché qualcuno non andava sul posto.
+
+- `did-finish-load` ora ignora sia le schermate locali (`file://`) sia la navigazione appena
+  fallita, tramite il flag `caricamentoFallito`.
+- Il test lo dimostra invece di assumerlo: `test/avvio.js` non si accontenta più della riga
+  "riprovo fra 5s" — quella viene scritta *prima* di armare il timer e passava anche con il bug —
+  ma pretende **una seconda caduta** e il raddoppio del backoff. Portato a 10 controlli.
+- Nuove righe di log: `pagina caricata: <url>`, `nuovo tentativo su <url>`, `controller di nuovo
+  raggiungibile`. Senza queste il bug era invisibile nel log.
+
+**Aggiornamento: download troncato**
+
+`update:install` scaricava, controllava solo che il file iniziasse per `MZ` e lo lanciava. Un
+download interrotto da un proxy al 90% supera quel controllo: si sarebbe installata un'app a metà
+sopra una funzionante, magari da remoto. Ora i byte ricevuti vengono confrontati con
+`content-length` e il file viene cancellato se non tornano.
+
+Aggiunta [ROADMAP-2.md](ROADMAP-2.md): analisi delle due codebase di `digital195/unifi-protect-viewer`
+(repo master riscritto + build 2.4.0 in TypeScript) confrontate con la 1.9.0. 46 proposte, 22
+confermate.
+
 ## 1.9.0 — Electron 44, cambio monitor, aggiornamento dall'app
 
 **Electron 28.3.3 → 44.3.0** (Chromium 120 → 144)

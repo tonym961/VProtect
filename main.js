@@ -29,6 +29,7 @@ let shuttingDown = false;
 let revealed = false;
 let retryTimer = null;
 let retryDelay = 0;
+let caricamentoFallito = false;
 let rebootTicker = null;
 let ultimoRefresh = '';
 let blockerId = -1;
@@ -257,7 +258,9 @@ function gestisciErroreCaricamento(codice, descrizione) {
   retryTimer = setTimeout(() => {
     retryTimer = null;
     const v = config.viste[vistaAttiva];
-    if (v && v.url && win && !win.isDestroyed()) win.loadURL(v.url, { userAgent: CHROME_USER_AGENT });
+    if (!v || !v.url || !win || win.isDestroyed()) { log('tentativo annullato: vista o finestra non disponibili'); return; }
+    log('nuovo tentativo su ' + v.url);
+    win.loadURL(v.url, { userAgent: CHROME_USER_AGENT });
   }, retryDelay);
 }
 
@@ -559,6 +562,12 @@ ipcMain.handle('update:install', async (event) => {
       out.on('finish', resolve);
       res.pipe(out);
     });
+    // Un download troncato da un proxy inizia comunque per MZ e supererebbe il controllo sotto:
+    // verrebbe installato sopra un'app funzionante, su una macchina che magari e' lontana.
+    if (totale && scaricati !== totale) {
+      try { fs.unlinkSync(dest); } catch (e2) {}
+      throw new Error('download incompleto: ' + scaricati + ' byte su ' + totale);
+    }
     // Controllo minimo: deve essere un eseguibile Windows, non una pagina di errore salvata.
     const testa = Buffer.alloc(2);
     const fd = fs.openSync(dest, 'r');
@@ -682,9 +691,25 @@ async function createWindows() {
   win.webContents.setWindowOpenHandler(({ url }) => { log('popup bloccato: ' + url); return { action: 'deny' }; });
 
   win.webContents.on('did-fail-load', (e, codice, descrizione, url, isMainFrame) => {
-    if (isMainFrame) gestisciErroreCaricamento(codice, descrizione);
+    if (!isMainFrame) return;
+    if (codice === -3) return; // ABORTED: navigazione annullata, non un guasto
+    caricamentoFallito = true;
+    gestisciErroreCaricamento(codice, descrizione);
   });
-  win.webContents.on('did-finish-load', () => { annullaRetry(); });
+
+  win.webContents.on('did-finish-load', () => {
+    const urlCaricato = win.webContents.getURL();
+    // wallpaper.html e' la schermata di cortesia locale, non e' il controller tornato su.
+    if (urlCaricato.startsWith('file://')) return;
+    // Chromium emette did-finish-load ANCHE per la navigazione fallita, perche' committa la
+    // propria pagina di errore, e getURL() resta l'indirizzo http originale. Senza questa
+    // guardia il tentativo appena programmato veniva cancellato ~5 ms dopo e il recupero non
+    // ripartiva mai: il backoff 5/10/20/40/60s era solo una riga di log (bug dalla 1.7.1).
+    if (caricamentoFallito) { caricamentoFallito = false; return; }
+    if (retryTimer) log('controller di nuovo raggiungibile');
+    log('pagina caricata: ' + urlCaricato);
+    annullaRetry();
+  });
   win.webContents.on('render-process-gone', (e, dettagli) => {
     log('renderer terminato (' + dettagli.reason + '), ricarico');
     setTimeout(() => loadVista(vistaAttiva), 2000);
