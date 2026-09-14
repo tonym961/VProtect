@@ -121,6 +121,15 @@ npm run test:avvio # avvia il main process in una userData temporanea e ne verif
 Girano entrambi in CI prima del packaging, insieme a `node --check` su tutti i sorgenti.
 
 
+## Versionamento
+
+**Solo patch.** Dopo la 1.9.0 viene la 1.9.1, poi la 1.9.2, e così via — anche quando la release
+introduce funzionalità nuove. Il numero identifica una build consegnata, non la semantica del
+cambiamento. Non far scattare il minor senza chiederlo.
+
+Le release 1.8.0 e 1.9.0 sono uno strascico storico: avrebbero dovuto essere 1.7.2 e 1.7.3, ma erano
+già pubblicate con i loro installer quando ce ne siamo accorti.
+
 ## Build automatica
 
 Il workflow [.github/workflows/build.yml](.github/workflows/build.yml) compila l'installer NSIS su un
