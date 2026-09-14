@@ -1,6 +1,6 @@
 {
   "name": "unifi-protect-monitor",
-  "version": "1.9.1",
+  "version": "1.9.2",
   "description": "Client UniFi Protect - Fix Codec Misti e UI Completa",
   "author": "Iotatau",
   "main": "main.js",

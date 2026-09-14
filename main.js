@@ -583,6 +583,20 @@ ipcMain.handle('update:install', async (event) => {
 
     log('avvio installer ' + dest);
     const installer = spawn(dest, [], { detached: true, stdio: 'ignore' });
+    // Senza un ascoltatore su 'error' un avvio fallito (antivirus che mette in quarantena il file
+    // appena scaricato, permessi negati) diventa un'eccezione non gestita nel main process,
+    // proprio mentre abbiamo appena detto all'utente che l'aggiornamento sta partendo.
+    const erroreAvvio = await new Promise((resolve) => {
+      let deciso = false;
+      const decidi = (v) => { if (!deciso) { deciso = true; resolve(v); } };
+      installer.on('error', decidi);
+      installer.on('spawn', () => decidi(null));
+      setTimeout(() => decidi(null), 2000);
+    });
+    if (erroreAvvio) {
+      log('avvio installer fallito: ' + erroreAvvio.message);
+      return { ok: false, message: 'Impossibile avviare l\'installer: ' + erroreAvvio.message + '. Il file resta in ' + dest };
+    }
     installer.unref();
     shuttingDown = true; // l'installer deve poter sostituire i file: si esce senza passare dal logout
     setTimeout(() => app.exit(0), 1000);
@@ -753,6 +767,7 @@ app.on('window-all-closed', () => { app.quit(); });
 app.on('will-quit', () => {
   globalShortcut.unregisterAll();
   if (rebootTicker) clearInterval(rebootTicker);
+  if (displayTimer) { clearTimeout(displayTimer); displayTimer = null; }
   annullaRetry();
   if (blockerId !== -1 && powerSaveBlocker.isStarted(blockerId)) powerSaveBlocker.stop(blockerId);
 });

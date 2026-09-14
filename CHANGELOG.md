@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.9.2 — due eccezioni non gestite
+
+Completato il "blocco 0" della [ROADMAP-2.md](ROADMAP-2.md): difetti veri, nessuna funzione nuova.
+
+- **`spawn` dell'installer senza ascoltatore su `error`.** Se l'avvio dell'installer appena
+  scaricato fallisce — antivirus che lo mette in quarantena, permessi negati — Node emette un
+  evento `error` che nessuno ascoltava: eccezione non gestita nel main process, proprio mentre
+  l'app aveva appena detto all'utente che l'aggiornamento stava partendo. Ora si attende l'esito
+  reale (`spawn` o `error`, con tetto di 2 secondi) e in caso di fallimento si torna un messaggio
+  che dice dove e' rimasto il file, senza uscire.
+- **`displayTimer` non azzerato in `will-quit`.** Chiudendo entro i 2 secondi dal riallineamento
+  per cambio monitor restava un timer pendente.
+
 ## 1.9.1 — il recupero automatico non ripartiva
 
 **Bug bloccante, presente dalla 1.7.1.** Quando il controller non risponde il programma mostra lo
