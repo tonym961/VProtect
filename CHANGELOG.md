@@ -1,5 +1,48 @@
 # Changelog
 
+## 1.8.0 — refactor di sicurezza
+
+Secondo blocco della [ROADMAP.md](ROADMAP.md). Cambia la struttura, non l'aspetto: le finestre
+sono le stesse di prima, ma non girano più con Node in mano al contenuto.
+
+**Le finestre di servizio non hanno più Node**
+
+- `password.html` e `settings.html` sono file veri, caricati con `loadFile`, con
+  `nodeIntegration: false`, `contextIsolation: true`, `sandbox: true` e una CSP
+  `default-src 'none'`. Prima erano stringhe HTML costruite in `main.js` e caricate come
+  `data:text/html` con Node integrato.
+- Tutto passa da [preload.js](preload.js): il renderer vede solo `window.api` con 9 metodi e
+  nient'altro. I canali IPC accettano messaggi **solo** da queste due finestre
+  (`mittenteAutorizzato`); la finestra che carica il controller non ha preload, quindi non ha
+  alcun ponte verso il main process.
+- Le righe delle viste sono costruite con le API del DOM, non concatenando HTML: un nome vista
+  è un valore, non markup. L'escaping della 1.7.1 resta come seconda linea, ma la classe di
+  difetto non esiste più per costruzione.
+
+**Password**
+
+- Non è più salvata in chiaro: `scrypt` con salt casuale a 16 byte, confronto in tempo costante.
+- Migrazione automatica al primo avvio: il vecchio campo `passwordApp` viene convertito e
+  rimosso dal file. Nessuna azione richiesta, la password resta quella che era.
+
+**Certificati**
+
+- ⚠️ **Rimosso `--ignore-certificate-errors`**, che disattivava la verifica TLS per l'intero
+  processo — qualunque host, non solo il controller. Al suo posto `setCertificateVerifyProc`
+  sulla sessione UniFi: i certificati self-signed sono accettati **solo** dagli host elencati
+  nelle viste configurate. Ogni rifiuto finisce in `monitor.log` con host e motivo.
+- Se il controller risponde su un indirizzo diverso da quelli configurati (redirect, reverse
+  proxy) c'è la casella *"Accetta certificati non validi da qualsiasi indirizzo"* nelle
+  impostazioni, che ripristina il comportamento permissivo. **Da verificare in campo**: è il
+  cambiamento con più probabilità di comportarsi diversamente dal previsto.
+
+**Test**
+
+- `npm test` carica davvero le due pagine in finestre nascoste e verifica 21 asserzioni:
+  preload esposto, Node irraggiungibile, CSP che non blocca gli script, 10 righe renderizzate,
+  un nome vista ostile che resta testo, URL `javascript:` rifiutato. Girano in CI prima del
+  packaging, insieme a `node --check` su tutti i sorgenti.
+
 ## 1.7.1 — correzione bug
 
 Batch di fix dalla [ROADMAP.md](ROADMAP.md), sezione "quick wins".

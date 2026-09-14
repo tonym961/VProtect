@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="UTF-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'self'">
+<title>Configurazione</title>
+<style>
+  body { font-family: sans-serif; padding: 15px; margin: 0; height: 100vh; box-sizing: border-box; overflow-y: auto; background: #ececec; }
+  h3 { margin-top: 0; }
+  h4 { margin: 0 0 10px 0; }
+  .riquadro { background: #fff; padding: 15px; margin-top: 10px; border-radius: 5px; border: 1px solid #ddd; }
+  .riquadro.grigio { background: #f9f9f9; border-color: #ccc; }
+  #viste { max-height: 40vh; overflow-y: auto; background: white; border: 1px solid #ccc; padding: 10px; border-radius: 5px; }
+  .vista { display: flex; gap: 10px; align-items: center; margin-bottom: 5px; border-bottom: 1px solid #eee; padding-bottom: 5px; }
+  .vista b { width: 60px; }
+  .vista .v-nome { width: 120px; }
+  .vista .v-url { flex-grow: 1; }
+  .vista .v-url.non-valido { border: 1px solid #d9534f; background: #fff5f5; }
+  .opzioni { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; }
+  .bottoniera { display: flex; justify-content: space-around; gap: 10px; }
+  .nota { font-size: 11px; color: #777; margin-bottom: 10px; }
+  button { border: none; cursor: pointer; border-radius: 4px; color: white; padding: 10px; }
+  #salva { background: #5cb85c; font-weight: bold; padding: 10px 20px; }
+  #backup { background: #337ab7; flex: 1; }
+  #restore { background: #f0ad4e; flex: 1; }
+  #cache { background: #777; flex: 1; }
+  #logout { background: #d9534f; width: 100%; padding: 8px; }
+  #cambiaPwd { background: #333; width: 100%; margin-top: 10px; padding: 8px; }
+  #chiudi { background: #999; padding: 5px 20px; }
+  table { width: 100%; border-spacing: 0 5px; }
+  table td:first-child { width: 120px; }
+  table input { width: 100%; }
+  .piede { margin-top: 15px; display: flex; justify-content: space-between; align-items: center; color: #888; }
+  #esito { margin-top: 10px; padding: 10px; border-radius: 4px; display: none; }
+  #esito.ok { display: block; background: #dff0d8; color: #3c763d; }
+  #esito.ko { display: block; background: #f2dede; color: #a94442; }
+</style>
+</head>
+<body>
+  <h3>🛠 Gestione Sistema</h3>
+
+  <div id="viste"></div>
+
+  <div class="riquadro opzioni">
+    <label><input type="checkbox" id="fs"> FullScreen</label>
+    <label><input type="checkbox" id="standby"> Schermo sempre acceso</label>
+    <div>
+      <label><input type="checkbox" id="autoReboot"> Refresh ore:</label>
+      <input type="time" id="ora">
+    </div>
+    <button id="salva">💾 SALVA</button>
+  </div>
+
+  <div class="riquadro">
+    <h4>🔓 Sessione UniFi</h4>
+    <label style="display:block; margin-bottom:6px;"><input type="checkbox" id="loExit"> Disconnetti l'account alla chiusura del programma</label>
+    <label style="display:block; margin-bottom:10px;"><input type="checkbox" id="loStart"> Richiedi sempre le credenziali all'avvio (vale anche dopo un blackout)</label>
+    <div class="nota">Il logout cancella solo cookie e token del controller: indirizzi IP, nomi delle viste e password del programma restano salvati.</div>
+    <button id="logout">🔓 Disconnetti account adesso</button>
+  </div>
+
+  <div class="riquadro">
+    <h4>🔐 Certificati</h4>
+    <label style="display:block; margin-bottom:10px;"><input type="checkbox" id="certTutti"> Accetta certificati non validi da qualsiasi indirizzo</label>
+    <div class="nota">Lasciandola deselezionata i certificati self-signed vengono accettati solo dagli host elencati nelle viste qui sopra. Spuntala solo se il controller risponde su un indirizzo diverso da quelli configurati (redirect, reverse proxy) — i rifiuti finiscono comunque in monitor.log.</div>
+  </div>
+
+  <div class="riquadro grigio bottoniera">
+    <button id="backup">📤 Backup</button>
+    <button id="restore">📥 Restore</button>
+    <button id="cache">🧹 Svuota Cache</button>
+  </div>
+
+  <div class="riquadro grigio">
+    <h4>🔐 Modifica Password</h4>
+    <table>
+      <tr><td>Attuale:</td><td><input type="password" id="pOld"></td></tr>
+      <tr><td>Nuova:</td><td><input type="password" id="p1"></td></tr>
+      <tr><td>Conferma:</td><td><input type="password" id="p2"></td></tr>
+    </table>
+    <button id="cambiaPwd">Aggiorna Password</button>
+  </div>
+
+  <div id="esito"></div>
+
+  <div class="piede"><span id="versione"></span><button id="chiudi">Chiudi</button></div>
+
+<script src="settings.js"></script>
+</body>
+</html>

@@ -30,7 +30,12 @@ jobs:
       # Il main process non viene mai eseguito durante il packaging: senza questo
       # passo un errore di sintassi finirebbe dritto dentro l'installer.
       - name: Controllo di sintassi
-        run: node --check main.js
+        run: node --check main.js && node --check preload.js && node --check password.js && node --check settings.js
+
+      # Carica davvero password.html e settings.html in finestre nascoste e verifica
+      # preload, CSP, rendering e validazione degli URL prima di impacchettare.
+      - name: Test delle finestre di servizio
+        run: npm test
 
       - name: Compila l'installer NSIS
         run: npx electron-builder --win nsis --x64 --publish never

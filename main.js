@@ -1,14 +1,17 @@
 const { app, BrowserWindow, globalShortcut, dialog, Menu, ipcMain, session, screen, powerSaveBlocker } = require('electron');
 const path = require('path');
 const fs = require('fs');
+const crypto = require('crypto');
 
 // Una sola istanza: due processi che scrivono viste_config.json si sovrascrivono a vicenda.
 if (!app.requestSingleInstanceLock()) { app.exit(0); }
 
 // --- OTTIMIZZAZIONE CODEC MISTI ---
-// Questi switch vengono dalla 1.x e restano invariati: non sono stati toccati perche'
-// non c'e' modo di riprodurre il sintomo per cui erano stati aggiunti.
-app.commandLine.appendSwitch('ignore-certificate-errors');
+// Questi switch vengono dalla 1.x e restano invariati: non c'e' modo di riprodurre il sintomo
+// per cui erano stati aggiunti, quindi non si toccano.
+// NOTA: 'ignore-certificate-errors' e' stato rimosso nella 1.8.0 — disattivava la verifica dei
+// certificati per l'intero processo. Ora la deroga vale solo per gli host configurati, vedi
+// configuraVerificaCertificati().
 app.commandLine.appendSwitch('disable-http-cache');
 app.commandLine.appendSwitch('enable-accelerated-video-decode');
 app.commandLine.appendSwitch('enable-gpu-rasterization');
@@ -18,6 +21,7 @@ let win;
 let splash;
 let promptWin;
 let settingsWin;
+let callbackPassword = null;
 let vistaAttiva = 1;
 let shuttingDown = false;
 let revealed = false;
@@ -32,18 +36,23 @@ const userDataPath = app.getPath('userData');
 const configPath = path.join(userDataPath, 'viste_config.json');
 const logPath = path.join(userDataPath, 'monitor.log');
 const iconPath = path.join(__dirname, 'icona.ico');
+const preloadPath = path.join(__dirname, 'preload.js');
 
 // Partizione dedicata a UniFi Protect: qui vivono SOLO cookie, token e cache del controller.
 // La configurazione (IP/URL delle viste, nomi, password del programma) sta in viste_config.json,
 // che e' un file separato e NON viene mai toccato dal logout.
 const UNIFI_PARTITION = 'persist:unifi';
 
+// Password di fabbrica delle installazioni storiche: resta il valore iniziale di un impianto
+// nuovo, ma non viene piu' salvata in chiaro (vedi assicuraPasswordHash).
+const PASSWORD_DEFAULT = 'Uat07Iot';
+
 // User Agent che simula un browser compatibile H.264
 const CHROME_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36";
 
 // --- LOG ---
-// Senza questo, i recuperi automatici (retry, riavvio del renderer, config in quarantena)
-// avvengono in silenzio e un intervento in loco non ha nulla da leggere.
+// Senza questo, i recuperi automatici (retry, riavvio del renderer, certificati rifiutati,
+// config in quarantena) avvengono in silenzio e un intervento in loco non ha nulla da leggere.
 function log(msg) {
   const riga = '[' + new Date().toISOString() + '] ' + msg + '\n';
   try {
@@ -56,13 +65,15 @@ function log(msg) {
 
 // --- CONFIG ---
 const defaultConfig = {
-  passwordApp: 'Uat07Iot',
+  passwordHash: null,
+  passwordSalt: null,
   avvioFullScreen: false,
   autoReboot: false,    // default off: sugli impianti gia' in campo non deve comparire un evento notturno
   oraReboot: '03:00',
   impedisciStandby: true,
   logoutOnExit: true,   // alla chiusura disconnette l'account UniFi
   logoutOnStart: true,  // all'avvio ripulisce comunque la sessione (copre crash e mancanza di corrente)
+  accettaTuttiICertificati: false,
   viste: {}
 };
 
@@ -109,16 +120,36 @@ function saveConfig() {
   }
 }
 
-// Ogni valore di config che finisce in una pagina HTML passa da qui. Le pagine impostazioni
-// girano con nodeIntegration attivo: un nome vista con un apice chiuderebbe l'attributo e
-// aprirebbe la strada a codice arbitrario (vettore: un file di Backup preparato ad arte).
-function esc(s) {
-  return String(s === null || s === undefined ? '' : s)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
+// --- PASSWORD DEL PROGRAMMA ---
+function calcolaHash(pw, saltHex) {
+  const salt = saltHex ? Buffer.from(saltHex, 'hex') : crypto.randomBytes(16);
+  const chiave = crypto.scryptSync(String(pw), salt, 32);
+  return { salt: salt.toString('hex'), hash: chiave.toString('hex') };
+}
+
+// Fino alla 1.7.x la password stava in chiaro in viste_config.json, sotto 'passwordApp'.
+// Alla prima esecuzione viene convertita in scrypt e il campo in chiaro sparisce dal file.
+function assicuraPasswordHash() {
+  if (config.passwordHash && config.passwordSalt) {
+    if (config.passwordApp !== undefined) { delete config.passwordApp; saveConfig(); }
+    return;
+  }
+  const sorgente = (typeof config.passwordApp === 'string' && config.passwordApp) ? config.passwordApp : PASSWORD_DEFAULT;
+  const h = calcolaHash(sorgente);
+  config.passwordHash = h.hash;
+  config.passwordSalt = h.salt;
+  delete config.passwordApp;
+  saveConfig();
+  log('password del programma convertita in hash scrypt');
+}
+
+function passwordCorretta(tentativo) {
+  if (!config.passwordHash || !config.passwordSalt) return false;
+  const h = calcolaHash(tentativo, config.passwordSalt);
+  const a = Buffer.from(h.hash, 'hex');
+  const b = Buffer.from(config.passwordHash, 'hex');
+  if (a.length !== b.length) return false;
+  return crypto.timingSafeEqual(a, b);
 }
 
 function urlValido(u) {
@@ -126,6 +157,34 @@ function urlValido(u) {
     const parsed = new URL(String(u));
     return parsed.protocol === 'http:' || parsed.protocol === 'https:';
   } catch (e) { return false; }
+}
+
+function hostConfigurati() {
+  const host = new Set();
+  for (let i = 0; i <= 9; i++) {
+    const v = config.viste[i];
+    if (!v || !v.url) continue;
+    try { host.add(new URL(v.url).hostname.toLowerCase()); } catch (e) {}
+  }
+  return host;
+}
+
+// I controller UniFi rispondono con certificati self-signed. Fino alla 1.7.x il programma
+// passava --ignore-certificate-errors, che spegne la verifica per QUALSIASI host: un captive
+// portal o un man-in-the-middle sulla rete del cliente passava senza un avviso. Ora la deroga
+// vale solo per gli host elencati nelle viste, e ogni rifiuto finisce nel log.
+function configuraVerificaCertificati(ses) {
+  ses.setCertificateVerifyProc((richiesta, callback) => {
+    if (richiesta.errorCode === 0 || richiesta.verificationResult === 'net::OK') return callback(0);
+    const host = String(richiesta.hostname || '').toLowerCase();
+    if (config.accettaTuttiICertificati) {
+      log('certificato non valido accettato in modalita permissiva: ' + host + ' (' + richiesta.verificationResult + ')');
+      return callback(0);
+    }
+    if (hostConfigurati().has(host)) return callback(0);
+    log('CERTIFICATO RIFIUTATO per ' + host + ' (' + richiesta.verificationResult + '): host non presente fra le viste configurate');
+    callback(-2);
+  });
 }
 
 // --- SESSIONE UNIFI / LOGOUT ---
@@ -219,21 +278,105 @@ function aggiornaBloccoStandby() {
   }
 }
 
-// --- IPC: BACKUP, RESTORE, CACHE, LOGOUT ---
-ipcMain.on('export-config', () => {
-  const dest = dialog.showSaveDialogSync({ title: 'Esporta', defaultPath: 'unifi_monitor_backup.json', filters: [{ name: 'JSON', extensions: ['json'] }] });
-  if (!dest) return;
-  try { fs.writeFileSync(dest, JSON.stringify(config, null, 2)); }
-  catch (e) { dialog.showErrorBox('Errore', 'Impossibile scrivere il backup:\n' + e.message); }
+// --- IPC ---
+// Solo le due finestre di servizio possono parlare con il main process. La finestra che carica
+// l'interfaccia del controller non ha preload, quindi non ha alcun canale verso qui.
+function mittenteAutorizzato(event) {
+  const wc = event.sender;
+  if (promptWin && !promptWin.isDestroyed() && wc === promptWin.webContents) return true;
+  if (settingsWin && !settingsWin.isDestroyed() && wc === settingsWin.webContents) return true;
+  log('messaggio IPC rifiutato da una finestra non autorizzata');
+  return false;
+}
+
+ipcMain.handle('auth:check', (event, valore) => {
+  if (!mittenteAutorizzato(event)) return false;
+  if (!passwordCorretta(valore)) { log('password errata'); return false; }
+  const callback = callbackPassword;
+  callbackPassword = null;
+  if (promptWin && !promptWin.isDestroyed()) promptWin.close();
+  if (typeof callback === 'function') setImmediate(callback);
+  return true;
 });
 
-ipcMain.on('import-config', () => {
+ipcMain.handle('settings:get', (event) => {
+  if (!mittenteAutorizzato(event)) return null;
+  return {
+    viste: config.viste,
+    avvioFullScreen: config.avvioFullScreen,
+    autoReboot: config.autoReboot,
+    oraReboot: config.oraReboot,
+    impedisciStandby: config.impedisciStandby,
+    logoutOnExit: config.logoutOnExit,
+    logoutOnStart: config.logoutOnStart,
+    accettaTuttiICertificati: config.accettaTuttiICertificati,
+    versione: app.getVersion()
+  };
+});
+
+ipcMain.handle('settings:save', (event, d) => {
+  if (!mittenteAutorizzato(event) || !d) return { ok: false, message: 'Richiesta non valida' };
+  const viste = {};
+  for (let i = 0; i <= 9; i++) {
+    const v = (d.viste && d.viste[i]) || config.viste[i] || defaultConfig.viste[i];
+    viste[i] = { nome: String(v.nome || '').slice(0, 120), url: String(v.url || ''), attiva: !!v.attiva };
+    if (viste[i].attiva && !urlValido(viste[i].url)) return { ok: false, message: 'Indirizzo non valido nella vista ' + i };
+  }
+  config.viste = viste;
+  config.avvioFullScreen = !!d.avvioFullScreen;
+  config.impedisciStandby = !!d.impedisciStandby;
+  config.autoReboot = !!d.autoReboot;
+  config.oraReboot = /^\d{2}:\d{2}$/.test(String(d.oraReboot)) ? d.oraReboot : config.oraReboot;
+  config.logoutOnExit = !!d.logoutOnExit;
+  config.logoutOnStart = !!d.logoutOnStart;
+  config.accettaTuttiICertificati = !!d.accettaTuttiICertificati;
+  const ok = saveConfig();
+  armaRefreshProgrammato(); // l'orario nuovo deve valere subito, non dal prossimo avvio
+  aggiornaBloccoStandby();
+  registraScorciatoie();
+  log('configurazione salvata (esito: ' + ok + ')');
+  return { ok, message: ok ? 'Salvato.' : 'SALVATAGGIO FALLITO — le modifiche valgono solo fino alla chiusura.' };
+});
+
+ipcMain.handle('settings:change-password', (event, d) => {
+  if (!mittenteAutorizzato(event) || !d) return { ok: false, message: 'Richiesta non valida' };
+  if (!passwordCorretta(d.oldP)) return { ok: false, message: 'Password attuale errata' };
+  if (!d.newP) return { ok: false, message: 'La nuova password non puo\' essere vuota' };
+  if (d.newP !== d.confP) return { ok: false, message: 'Le nuove password non coincidono' };
+  const vecchioHash = config.passwordHash;
+  const vecchioSalt = config.passwordSalt;
+  const h = calcolaHash(d.newP);
+  config.passwordHash = h.hash;
+  config.passwordSalt = h.salt;
+  if (!saveConfig()) {
+    config.passwordHash = vecchioHash;
+    config.passwordSalt = vecchioSalt;
+    return { ok: false, message: 'Salvataggio fallito: password NON modificata' };
+  }
+  log('password del programma aggiornata');
+  return { ok: true, message: 'Password aggiornata.' };
+});
+
+ipcMain.handle('settings:export', (event) => {
+  if (!mittenteAutorizzato(event)) return { ok: false, message: 'Richiesta non valida' };
+  const dest = dialog.showSaveDialogSync({ title: 'Esporta', defaultPath: 'unifi_monitor_backup.json', filters: [{ name: 'JSON', extensions: ['json'] }] });
+  if (!dest) return { ok: true, message: 'Backup annullato.' };
+  try {
+    fs.writeFileSync(dest, JSON.stringify(config, null, 2));
+    return { ok: true, message: 'Backup salvato in ' + dest };
+  } catch (e) {
+    return { ok: false, message: 'Impossibile scrivere il backup: ' + e.message };
+  }
+});
+
+ipcMain.handle('settings:import', (event) => {
+  if (!mittenteAutorizzato(event)) return { ok: false, message: 'Richiesta non valida' };
   const files = dialog.showOpenDialogSync({ title: 'Importa', filters: [{ name: 'JSON', extensions: ['json'] }] });
-  if (!files) return;
+  if (!files) return { ok: true, message: 'Restore annullato.' };
   try {
     const importata = JSON.parse(fs.readFileSync(files[0], 'utf8'));
-    // Il file arriva da fuori: le viste finiscono dentro la pagina impostazioni, quindi si valida.
-    if (!importata || typeof importata !== 'object') throw new Error('struttura non valida');
+    // Il file arriva da fuori: si valida prima di accettarlo.
+    if (!importata || typeof importata !== 'object' || Array.isArray(importata)) throw new Error('struttura non valida');
     if (importata.viste) {
       for (let i = 0; i <= 9; i++) {
         const v = importata.viste[i];
@@ -245,162 +388,68 @@ ipcMain.on('import-config', () => {
     config = Object.assign({}, defaultConfig, importata);
     for (let i = 0; i <= 9; i++) { if (!config.viste[i]) config.viste[i] = defaultConfig.viste[i]; }
     if (!saveConfig()) throw new Error('salvataggio fallito');
-    log('config importata da ' + files[0]);
+    log('config importata da ' + files[0] + ', riavvio');
     app.relaunch(); app.exit();
+    return { ok: true, message: 'Importata, riavvio in corso.' };
   } catch (e) {
-    dialog.showErrorBox('Errore', 'File non valido:\n' + e.message);
+    return { ok: false, message: 'File non valido: ' + e.message };
   }
 });
 
-ipcMain.on('clear-cache', async () => {
+ipcMain.handle('settings:clear-cache', async (event) => {
+  if (!mittenteAutorizzato(event)) return { ok: false, message: 'Richiesta non valida' };
   await getUnifiSession().clearCache();
   if (win && !win.isDestroyed()) win.reload();
-  dialog.showMessageBox({ message: 'Cache svuotata e pagina ricaricata!' });
+  return { ok: true, message: 'Cache svuotata e pagina ricaricata.' };
 });
 
-ipcMain.on('logout-now', async (event) => {
+ipcMain.handle('settings:logout', async (event) => {
+  if (!mittenteAutorizzato(event)) return { ok: false, message: 'Richiesta non valida' };
   await logoutUnifi({ serverSide: true });
   loadVista(vistaAttiva);
-  event.reply('p-res', 'Account disconnesso: al prossimo caricamento verranno richieste le credenziali.');
+  return { ok: true, message: 'Account disconnesso: al prossimo caricamento verranno richieste le credenziali.' };
 });
 
-// --- PASSWORD ---
+ipcMain.on('window:close', (event) => {
+  if (!mittenteAutorizzato(event)) return;
+  const finestra = BrowserWindow.fromWebContents(event.sender);
+  if (finestra && !finestra.isDestroyed()) finestra.close();
+});
+
+// --- FINESTRE DI SERVIZIO ---
+const webPreferencesServizio = {
+  preload: preloadPath,
+  nodeIntegration: false,
+  contextIsolation: true,
+  sandbox: true
+};
+
 function checkPassword(callback) {
   if (promptWin && !promptWin.isDestroyed()) { promptWin.focus(); return; }
-  promptWin = new BrowserWindow({ width: 400, height: 320, parent: win, modal: true, frame: false, icon: iconPath, resizable: false, webPreferences: { nodeIntegration: true, contextIsolation: false } });
-  const html = `
-    <body style="font-family:sans-serif; padding:20px; text-align:center; background:#f0f0f0; border:3px solid #333;">
-      <h3>🔒 Accesso Protetto</h3>
-      <div id="errorMsg" style="color:red; font-size:12px; height:20px; visibility:hidden;">Password Errata!</div>
-      <div style="display:flex; align-items:center; background:white; border:1px solid #ccc; border-radius:4px; padding:2px 10px; margin-bottom: 20px;">
-        <input type="password" id="pass" style="border:none; outline:none; padding:10px; flex-grow:1; font-size:16px;" autofocus placeholder="Password..." onkeydown="if(event.key==='Enter'){submitPass()} if(event.key==='Escape'){window.close()}">
-        <span onclick="const p=document.getElementById('pass'); p.type=p.type==='password'?'text':'password'" style="cursor:pointer; font-size:18px; padding:0 5px; user-select:none;">👁️</span>
-      </div>
-      <button onclick="submitPass()" style="padding:10px 25px; background:#5cb85c; color:white; border:none; cursor:pointer; font-weight:bold; border-radius:4px;">Accedi</button>
-      <button onclick="window.close()" style="padding:10px 25px; background:#777; color:white; border:none; cursor:pointer; border-radius:4px;">Esci</button>
-      <script>
-        const { ipcRenderer } = require('electron');
-        function submitPass() { ipcRenderer.send('check-pass-val', document.getElementById('pass').value); }
-        ipcRenderer.on('pass-result', (e, res) => { if(res) window.close(); else { document.getElementById('errorMsg').style.visibility = 'visible'; document.getElementById('pass').value = ''; document.getElementById('pass').focus(); } });
-      </script>
-    </body>`;
-  promptWin.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
-  // Un prompt abbandonato lasciava un listener 'pass-ok' armato fino alla chiamata successiva.
-  ipcMain.removeAllListeners('pass-ok');
-  ipcMain.once('pass-ok', callback);
-  promptWin.on('closed', () => { promptWin = null; ipcMain.removeAllListeners('pass-ok'); });
+  callbackPassword = callback;
+  promptWin = new BrowserWindow({
+    width: 400, height: 320, parent: win, modal: true, frame: false,
+    icon: iconPath, resizable: false, webPreferences: webPreferencesServizio
+  });
+  promptWin.loadFile('password.html');
+  promptWin.on('closed', () => { promptWin = null; callbackPassword = null; });
 }
 
-ipcMain.on('check-pass-val', (event, p) => {
-  if (p === config.passwordApp) { event.reply('pass-result', true); ipcMain.emit('pass-ok'); }
-  else { log('password errata'); event.reply('pass-result', false); }
-});
-
-// --- IMPOSTAZIONI ---
 function openSettings() {
   if (settingsWin && !settingsWin.isDestroyed()) { settingsWin.focus(); return; }
-  const v = app.getVersion();
   // Su un pannello 1366x768 la finestra da 850x1050 usciva dallo schermo e i bottoni in fondo
-  // (Chiudi, cambio password) erano irraggiungibili. Si stringe alla work area del monitor in uso.
-  const disp = screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
-  const wa = disp.workAreaSize;
+  // erano irraggiungibili. Si stringe alla work area del monitor in uso.
+  const wa = screen.getDisplayNearestPoint(screen.getCursorScreenPoint()).workAreaSize;
   settingsWin = new BrowserWindow({
     width: Math.min(850, Math.max(700, wa.width - 60)),
     height: Math.min(1050, Math.max(400, wa.height - 60)),
     minWidth: 700, minHeight: 400,
     parent: win, modal: true, title: 'Configurazione', autoHideMenuBar: true, icon: iconPath,
-    webPreferences: { nodeIntegration: true, contextIsolation: false }
+    webPreferences: webPreferencesServizio
   });
+  settingsWin.loadFile('settings.html');
   settingsWin.on('closed', () => { settingsWin = null; });
-  const html = `
-    <body style="font-family:sans-serif; padding:15px; margin:0; height:100vh; box-sizing:border-box; overflow-y:auto; background:#ececec;">
-      <h3>🛠 Gestione Sistema</h3>
-      <div style="max-height:40vh; overflow-y:auto; background:white; border:1px solid #ccc; padding:10px; border-radius:5px;">
-        ${[1,2,3,4,5,6,7,8,9,0].map(num => `<div style="display:flex; gap:10px; align-items:center; margin-bottom:5px; border-bottom:1px solid #eee; padding-bottom:5px;">
-            <input type="checkbox" class="v-attiva" data-id="${num}" ${config.viste[num].attiva ? 'checked' : ''}>
-            <b style="width:60px;">Ctrl+${num}</b>
-            <input type="text" class="v-nome" data-id="${num}" style="width:120px;" value="${esc(config.viste[num].nome)}">
-            <input type="text" class="v-url" data-id="${num}" style="flex-grow:1;" value="${esc(config.viste[num].url)}">
-          </div>`).join('')}
-      </div>
-      <div style="background:#fff; padding:15px; margin-top:10px; border-radius:5px; border:1px solid #ddd; display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px;">
-        <label><input type="checkbox" id="fs" ${config.avvioFullScreen ? 'checked' : ''}> FullScreen</label>
-        <label><input type="checkbox" id="standby" ${config.impedisciStandby ? 'checked' : ''}> Schermo sempre acceso</label>
-        <div><label><input type="checkbox" id="autoReboot" ${config.autoReboot ? 'checked' : ''}> Refresh ore:</label> <input type="time" id="ora" value="${esc(config.oraReboot)}"></div>
-        <button onclick="saveAll()" style="background:#5cb85c; color:white; border:none; padding:10px 20px; font-weight:bold; cursor:pointer; border-radius:4px;">💾 SALVA</button>
-      </div>
-
-      <div style="background:#fff; padding:15px; margin-top:10px; border-radius:5px; border:1px solid #ddd;">
-        <h4 style="margin:0 0 10px 0;">🔓 Sessione UniFi</h4>
-        <label style="display:block; margin-bottom:6px;"><input type="checkbox" id="loExit" ${config.logoutOnExit ? 'checked' : ''}> Disconnetti l'account alla chiusura del programma</label>
-        <label style="display:block; margin-bottom:10px;"><input type="checkbox" id="loStart" ${config.logoutOnStart ? 'checked' : ''}> Richiedi sempre le credenziali all'avvio (vale anche dopo un blackout)</label>
-        <div style="font-size:11px; color:#777; margin-bottom:10px;">Il logout cancella solo cookie e token del controller: indirizzi IP, nomi delle viste e password del programma restano salvati.</div>
-        <button onclick="ipcRenderer.send('logout-now')" style="width:100%; padding:8px; background:#d9534f; color:white; border:none; cursor:pointer; border-radius:4px;">🔓 Disconnetti account adesso</button>
-      </div>
-
-      <div style="background:#f9f9f9; padding:15px; margin-top:10px; border-radius:5px; border:1px solid #ccc; display:flex; justify-content:space-around; gap:10px;">
-        <button onclick="ipcRenderer.send('export-config')" style="flex:1; padding:10px; background:#337ab7; color:white; border:none; border-radius:4px; cursor:pointer;">📤 Backup</button>
-        <button onclick="ipcRenderer.send('import-config')" style="flex:1; padding:10px; background:#f0ad4e; color:white; border:none; border-radius:4px; cursor:pointer;">📥 Restore</button>
-        <button onclick="ipcRenderer.send('clear-cache')" style="flex:1; padding:10px; background:#777; color:white; border:none; border-radius:4px; cursor:pointer;">🧹 Svuota Cache</button>
-      </div>
-
-      <div style="background:#f9f9f9; padding:15px; margin-top:10px; border-radius:5px; border:1px solid #ccc;">
-        <h4 style="margin:0 0 10px 0;">🔐 Modifica Password</h4>
-        <table style="width:100%; border-spacing: 0 5px;">
-          <tr><td style="width:120px;">Attuale:</td><td><input type="password" id="pOld" style="width:100%;"></td></tr>
-          <tr><td>Nuova:</td><td><input type="password" id="p1" style="width:100%;"></td></tr>
-          <tr><td>Conferma:</td><td><input type="password" id="p2" style="width:100%;"></td></tr>
-        </table>
-        <button onclick="changeP()" style="width:100%; margin-top:10px; padding:8px; background:#333; color:white; border:none; cursor:pointer;">Aggiorna Password</button>
-      </div>
-      <div style="margin-top:15px; display:flex; justify-content:space-between; color:#888;"><span>v${esc(v)}</span><button onclick="window.close()" style="padding:5px 20px;">Chiudi</button></div>
-      <script>
-        const { ipcRenderer } = require('electron');
-        function saveAll() {
-          const vistas = {}; [1,2,3,4,5,6,7,8,9,0].forEach(i => { vistas[i] = { nome: document.querySelector('.v-nome[data-id="'+i+'"]').value, url: document.querySelector('.v-url[data-id="'+i+'"]').value, attiva: document.querySelector('.v-attiva[data-id="'+i+'"]').checked }; });
-          ipcRenderer.send('save-all-data', {
-            vistas,
-            fs: document.getElementById('fs').checked,
-            ora: document.getElementById('ora').value,
-            autoReboot: document.getElementById('autoReboot').checked,
-            standby: document.getElementById('standby').checked,
-            loExit: document.getElementById('loExit').checked,
-            loStart: document.getElementById('loStart').checked
-          });
-        }
-        function changeP() { ipcRenderer.send('req-p', { oldP: document.getElementById('pOld').value, newP: document.getElementById('p1').value, confP: document.getElementById('p2').value }); }
-        ipcRenderer.on('p-res', (e, m) => alert(m));
-      </script></body>`;
-  settingsWin.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
 }
-
-ipcMain.on('req-p', (event, d) => {
-  if (d.oldP !== config.passwordApp) event.reply('p-res', 'Password attuale errata');
-  else if (!d.newP) event.reply('p-res', 'La nuova password non puo\' essere vuota');
-  else if (d.newP !== d.confP) event.reply('p-res', 'Le nuove password non coincidono');
-  else {
-    const vecchia = config.passwordApp;
-    config.passwordApp = d.newP;
-    if (saveConfig()) { log('password del programma aggiornata'); event.reply('p-res', 'Password aggiornata!'); }
-    else { config.passwordApp = vecchia; event.reply('p-res', 'Salvataggio fallito: password NON modificata'); }
-  }
-});
-
-ipcMain.on('save-all-data', (event, d) => {
-  config.viste = d.vistas;
-  config.avvioFullScreen = d.fs;
-  config.oraReboot = d.ora;
-  config.autoReboot = !!d.autoReboot;
-  config.impedisciStandby = !!d.standby;
-  config.logoutOnExit = !!d.loExit;
-  config.logoutOnStart = !!d.loStart;
-  for (let i = 0; i <= 9; i++) { if (!config.viste[i]) config.viste[i] = defaultConfig.viste[i]; }
-  const ok = saveConfig();
-  armaRefreshProgrammato(); // l'orario nuovo deve valere subito, non dal prossimo avvio
-  aggiornaBloccoStandby();
-  registraScorciatoie();
-  dialog.showMessageBox({ message: ok ? 'Salvato!' : 'SALVATAGGIO FALLITO — le modifiche valgono solo fino alla chiusura.' });
-});
 
 // Le viste disattivate non registrano l'hotkey: su installazione fresca le 6-9 puntano al
 // cloud UniFi e un Ctrl+7 accidentale buttava la parete sulla pagina di login.
@@ -415,7 +464,7 @@ function registraScorciatoie() {
   globalShortcut.register('F10', () => checkPassword(openSettings));
 }
 
-// --- FINESTRE ---
+// --- FINESTRA PRINCIPALE ---
 function revealMainWindow() {
   if (revealed) return;
   revealed = true;
@@ -426,6 +475,7 @@ function revealMainWindow() {
 
 async function createWindows() {
   Menu.setApplicationMenu(null); // niente menu di default, niente acceleratore per i DevTools
+  assicuraPasswordHash();
 
   splash = new BrowserWindow({ width: 500, height: 400, frame: false, alwaysOnTop: true, transparent: true, icon: iconPath });
   splash.loadFile('splash.html');
@@ -440,6 +490,7 @@ async function createWindows() {
   if (config.logoutOnStart) { try { await logoutUnifi({ serverSide: false }); } catch (e) {} }
 
   const ses = getUnifiSession();
+  configuraVerificaCertificati(ses);
   // Una parete video non ha motivo di concedere microfono, webcam, posizione o notifiche.
   ses.setPermissionRequestHandler((wc, permission, callback) => {
     const consentito = permission === 'fullscreen';
@@ -450,6 +501,7 @@ async function createWindows() {
   win = new BrowserWindow({
     width: 1280, height: 720, title: 'UniFi Protect Monitor', autoHideMenuBar: true, icon: iconPath,
     show: false, backgroundColor: '#1c2b39', fullscreen: config.avvioFullScreen,
+    // Nessun preload qui: la pagina del controller non deve avere alcun ponte verso il main process.
     webPreferences: { nodeIntegration: false, contextIsolation: true, partition: UNIFI_PARTITION }
   });
 

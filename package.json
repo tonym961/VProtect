@@ -1,13 +1,14 @@
 {
   "name": "unifi-protect-monitor",
-  "version": "1.7.1",
+  "version": "1.8.0",
   "description": "Client UniFi Protect - Fix Codec Misti e UI Completa",
   "author": "Iotatau",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
     "dist": "electron-builder --win nsis --x64",
-    "pack": "electron-builder --dir"
+    "pack": "electron-builder --dir",
+    "test": "electron test/smoke.js"
   },
   "devDependencies": {
     "electron": "28.3.3",
@@ -20,6 +21,11 @@
     "publish": null,
     "files": [
       "main.js",
+      "preload.js",
+      "password.html",
+      "password.js",
+      "settings.html",
+      "settings.js",
       "splash.html",
       "wallpaper.html",
       "logo.png",
