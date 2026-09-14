@@ -1,0 +1,56 @@
+name: Build installer
+
+# Compila l'installer NSIS su un runner Windows: nessun PC di build necessario.
+#  - push di un tag v*  -> compila e allega l'exe alla release
+#  - "Run workflow"     -> compila e basta, l'exe resta come artifact per 90 giorni
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # Niente package-lock.json nel repo, quindi npm install e non npm ci.
+      - name: Installa le dipendenze
+        run: npm install --no-audit --no-fund
+
+      - name: Compila l'installer NSIS
+        run: npx electron-builder --win nsis --x64 --publish never
+
+      - name: Elenca il risultato
+        shell: pwsh
+        run: Get-ChildItem dist -Filter *.exe | Select-Object Name, Length
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: UniFi_Monitor_installer
+          path: dist/*.exe
+          if-no-files-found: error
+
+      - name: Allega alla release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $exe = (Get-ChildItem dist -Filter *.exe | Select-Object -First 1).FullName
+          if (-not $exe) { throw "nessun .exe in dist/" }
+          gh release view $env:GITHUB_REF_NAME 2>$null | Out-Null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $env:GITHUB_REF_NAME $exe --clobber
+          } else {
+            gh release create $env:GITHUB_REF_NAME $exe --title $env:GITHUB_REF_NAME --notes-file CHANGELOG.md
+          }

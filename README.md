@@ -96,6 +96,19 @@ File: `%APPDATA%\unifi-protect-monitor\viste_config.json`
 
 Questi punti sono tracciati nella roadmap di miglioramento.
 
+
+## Build automatica
+
+Il workflow [.github/workflows/build.yml](.github/workflows/build.yml) compila l'installer NSIS su un
+runner Windows di GitHub, quindi non serve avere Node.js sul PC locale.
+
+- **Release**:  -> compila e allega  alla release del tag.
+- **Prova**: Actions -> "Build installer" -> *Run workflow* -> l'exe resta come artifact per 90 giorni.
+
+
+
+Vedi [ROADMAP.md](ROADMAP.md) per i miglioramenti pianificati.
+
 ## Licenza
 
 Software proprietario — Iotatau.
