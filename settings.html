@@ -70,7 +70,7 @@
     <label style="display:block; margin-bottom:6px;"><input type="checkbox" id="riallinea"> Riadatta la finestra quando cambia l'uscita video</label>
     <div class="nota">Passando da DisplayPort a HDMI la finestra resta dimensionata sul monitor precedente e la griglia di Protect non si riadatta da sola. Con questa attiva il programma aspetta che il cambio si assesti, riporta la finestra sul monitor giusto e ricarica la vista.</div>
     <label style="display:block; margin-bottom:6px;"><input type="checkbox" id="accelerazione"> Accelerazione hardware</label>
-    <div class="nota">Se lo sfarfallio resta anche dopo il riadattamento, togli la spunta: la decodifica passa alla CPU (più carico, ma il compositore video non viene più reinizializzato). Ha effetto al riavvio del programma.</div>
+    <div class="nota">Se lo sfarfallio resta anche dopo il riadattamento, togli la spunta: la decodifica passa alla CPU (più carico, ma il compositore video non viene più reinizializzato). Ha effetto al riavvio del programma: dopo aver salvato, chiudi questa finestra e usa <em>Riavvia il programma</em> dal menu con il tasto destro.</div>
   </div>
 
   <div class="riquadro">
@@ -83,6 +83,12 @@
     <div id="barra" style="display:none; margin-top:10px; background:#e0e0e0; border-radius:4px; height:18px; overflow:hidden;">
       <div id="avanzamento" style="width:0%; height:100%; background:#5cb85c; transition:width .2s;"></div>
     </div>
+  </div>
+
+  <div class="riquadro">
+    <h4>🩺 Diagnostica</h4>
+    <div class="nota" id="dettagliDiagnostica">…</div>
+    <button id="apriLog" style="width:100%; background:#777;">📂 Apri la cartella del log</button>
   </div>
 
   <div class="riquadro grigio bottoniera">

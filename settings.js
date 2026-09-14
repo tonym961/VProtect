@@ -106,10 +106,19 @@ const bottoneInstalla = document.getElementById('installa');
 const barra = document.getElementById('barra');
 const avanzamento = document.getElementById('avanzamento');
 
-window.api.suProgressoAggiornamento((pct) => {
+function mb(byte) { return (byte / 1048576).toFixed(1); }
+
+// Il main manda { pct, scaricati, totale, bps }: su una linea lenta la sola percentuale non
+// distingue "sta scaricando piano" da "si e' piantato".
+window.api.suProgressoAggiornamento((p) => {
+  const pct = typeof p === 'object' && p ? p.pct : p;
   barra.style.display = 'block';
   avanzamento.style.width = pct + '%';
-  bottoneInstalla.textContent = 'Scarico… ' + pct + '%';
+  if (typeof p === 'object' && p && p.totale) {
+    bottoneInstalla.textContent = pct + '% — ' + mb(p.scaricati) + ' / ' + mb(p.totale) + ' MB — ' + mb(p.bps) + ' MB/s';
+  } else {
+    bottoneInstalla.textContent = 'Scarico… ' + pct + '%';
+  }
 });
 
 document.getElementById('controlla').addEventListener('click', async () => {
@@ -128,10 +137,15 @@ bottoneInstalla.addEventListener('click', async () => {
   bottoneInstalla.textContent = 'Scarico…';
   const res = await window.api.installaAggiornamento();
   mostraEsito(res.message, res.ok);
-  if (!res.ok) {
+  // Il ripristino vale anche quando l'esito e' ok: premendo "Annulla" nel dialogo di conferma
+  // l'handler torna ok:true, e il bottone restava disabilitato con l'etichetta dell'ultimo
+  // progresso ("100% — 62.0 / 62.0 MB") e la barra piena, cioe' mentendo. L'unico caso in cui
+  // non si ripristina e' l'installazione avviata davvero, dove il programma sta chiudendo.
+  if (!res.avviato) {
     bottoneInstalla.disabled = false;
     bottoneInstalla.textContent = '⬇️ Scarica e installa';
     barra.style.display = 'none';
+    avanzamento.style.width = '0%';
   }
 });
 
@@ -164,4 +178,78 @@ azione('logout', () => window.api.disconnettiAccount(), false);
 
 document.getElementById('chiudi').addEventListener('click', () => window.api.chiudi());
 
+// --- diagnostica ---
+// accelerazioneAttiva arriva da app.isHardwareAccelerationEnabled(), cioe' lo stato reale del
+// processo, non il valore scritto in configurazione: dopo aver tolto la spunta senza riavviare
+// i due valori differiscono, ed e' esattamente il momento in cui serve saperlo.
+// Chromium su Windows NON ha un decoder H.265 software: per l'HEVC si appoggia alla decodifica
+// hardware via Media Foundation. Se la GPU non la offre, o se mancano le "Estensioni video HEVC"
+// di Windows, le telecamere impostate su H.265 restano nere mentre quelle H.264 si vedono.
+// Va rilevato SUL PC che ha il problema: da un'altra postazione non si vede niente.
+async function rilevaCodec() {
+  const prova = (tipo) => {
+    try { return typeof MediaSource !== 'undefined' && MediaSource.isTypeSupported(tipo); }
+    catch (e) { return false; }
+  };
+  const h264 = prova('video/mp4; codecs="avc1.64001f"');
+  const h265 = prova('video/mp4; codecs="hvc1.1.6.L93.B0"') || prova('video/mp4; codecs="hev1.1.6.L93.B0"');
+  let h265Accelerato = false;
+  try {
+    const cap = await navigator.mediaCapabilities.decodingInfo({
+      type: 'media-source',
+      video: { contentType: 'video/mp4; codecs="hvc1.1.6.L93.B0"', width: 1920, height: 1080, bitrate: 4000000, framerate: 30 }
+    });
+    h265Accelerato = !!(cap && cap.powerEfficient);
+  } catch (e) { h265Accelerato = false; }
+  const esito = { h264, h265, h265Accelerato };
+  window.api.segnalaCodec(esito); // finisce nel log, cosi' basta quello per la diagnosi a distanza
+  return esito;
+}
+
+async function caricaDiagnostica() {
+  const d = await window.api.leggiDiagnostica();
+  if (!d) return;
+  const codec = await rilevaCodec();
+  const righe = [
+    'Electron ' + d.electron + ' · Chromium ' + d.chrome,
+    'Accelerazione hardware in questo avvio: ' + (d.accelerazioneAttiva ? 'attiva' : 'disattivata'),
+    'Vista a schermo: ' + d.nomeVistaAttiva + (d.riconnessioneInCorso ? ' (riconnessione in corso)' : ''),
+    'Log: ' + d.logPath,
+    'Configurazione: ' + d.configPath
+  ];
+  const contenitore = document.getElementById('dettagliDiagnostica');
+  contenitore.textContent = '';
+  righe.forEach((testo) => {
+    const riga = document.createElement('div');
+    riga.textContent = testo;
+    contenitore.append(riga);
+  });
+
+  // Il verdetto sui codec sta a parte ed e' evidenziato: e' la risposta alla domanda
+  // "perche' su questo PC alcune telecamere non si vedono e altre si".
+  const codecRiga = document.createElement('div');
+  codecRiga.id = 'statoCodec';
+  codecRiga.style.marginTop = '10px';
+  codecRiga.style.padding = '8px';
+  codecRiga.style.borderRadius = '4px';
+  if (codec.h265) {
+    codecRiga.style.background = '#dff0d8';
+    codecRiga.style.color = '#3c763d';
+    codecRiga.textContent = 'H.264 e H.265 supportati da questo PC' +
+      (codec.h265Accelerato ? ' (H.265 con accelerazione hardware).' : ' (H.265 senza accelerazione hardware: carico CPU alto con molte camere).');
+  } else {
+    codecRiga.style.background = '#f2dede';
+    codecRiga.style.color = '#a94442';
+    codecRiga.textContent = 'Questo PC NON sa decodificare l\'H.265: le telecamere impostate su H.265 resteranno nere, quelle H.264 si vedranno. ' +
+      'Rimedi: installa le "Estensioni video HEVC" da Microsoft Store e aggiorna i driver della scheda video, oppure imposta quelle telecamere su H.264 dentro UniFi Protect.';
+  }
+  contenitore.append(codecRiga);
+}
+
+document.getElementById('apriLog').addEventListener('click', async () => {
+  const res = await window.api.apriLog();
+  if (res && res.message) mostraEsito(res.message, res.ok);
+});
+
 carica();
+caricaDiagnostica();

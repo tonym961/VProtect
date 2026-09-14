@@ -1,39 +1,89 @@
 <!DOCTYPE html>
-<html>
+<html lang="it">
 <head>
-    <style>
-        body { 
-            margin: 0; 
-            /* Colore blu scuro/petrolio professionale */
-            background-color: #1c2b39; 
-            display: flex; 
-            flex-direction: column;
-            align-items: center; 
-            justify-content: center; 
-            height: 100vh; 
-            overflow: hidden;
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            color: #d1d1d1;
-        }
-        .logo {
-            font-size: 72px;
-            font-weight: 300;
-            letter-spacing: 5px;
-        }
-        .logo span {
-            color: #d498bc; /* Colore rosa/lilla del tuo logo */
-        }
-        .subtitle {
-            margin-top: 10px;
-            font-size: 14px;
-            text-transform: uppercase;
-            letter-spacing: 3px;
-            opacity: 0.6;
-        }
-    </style>
+<meta charset="UTF-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'self'">
+<title>Connessione non riuscita</title>
+<style>
+    body {
+        margin: 0;
+        /* Colore blu scuro/petrolio professionale */
+        background-color: #1c2b39;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        height: 100vh;
+        overflow: hidden;
+        font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        color: #d1d1d1;
+    }
+    .logo {
+        font-size: 72px;
+        font-weight: 300;
+        letter-spacing: 5px;
+    }
+    .logo span {
+        color: #d498bc; /* Colore rosa/lilla del logo */
+    }
+    .subtitle {
+        margin-top: 10px;
+        font-size: 14px;
+        text-transform: uppercase;
+        letter-spacing: 3px;
+        opacity: 0.6;
+    }
+    #errore {
+        margin-top: 48px;
+        max-width: 70vw;
+        text-align: center;
+        font-size: 15px;
+        line-height: 1.7;
+        opacity: 0.85;
+        display: none;
+    }
+    #errore.visibile { display: block; }
+    #titoloErrore {
+        font-size: 20px;
+        color: #e8b4b4;
+        margin-bottom: 14px;
+    }
+    #indirizzo {
+        font-family: Consolas, 'Courier New', monospace;
+        font-size: 13px;
+        opacity: 0.7;
+        word-break: break-all;
+    }
+    #codice {
+        font-family: Consolas, 'Courier New', monospace;
+        font-size: 13px;
+        opacity: 0.55;
+        margin-top: 6px;
+    }
+    #suggerimento {
+        margin-top: 14px;
+        font-size: 13px;
+        color: #d498bc;
+        opacity: 0.9;
+    }
+    #attesa {
+        margin-top: 18px;
+        font-size: 13px;
+        opacity: 0.6;
+    }
+</style>
 </head>
 <body>
     <div class="logo">iota<span>tau</span></div>
     <div class="subtitle">Monitoraggio UniFi Protect</div>
+
+    <div id="errore">
+        <div id="titoloErrore"></div>
+        <div id="indirizzo"></div>
+        <div id="codice"></div>
+        <div id="suggerimento"></div>
+        <div id="attesa"></div>
+    </div>
+<script src="wallpaper.js"></script>
 </body>
 </html>

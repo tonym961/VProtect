@@ -25,5 +25,10 @@ contextBridge.exposeInMainWorld('api', {
     ipcRenderer.on('update:progress', (evento, percentuale) => callback(percentuale));
   },
 
+  // --- diagnostica ---
+  leggiDiagnostica: () => ipcRenderer.invoke('diagnostica:get'),
+  apriLog: () => ipcRenderer.invoke('diagnostica:apri-log'),
+  segnalaCodec: (dati) => ipcRenderer.send('diagnostica:codec', dati),
+
   chiudi: () => ipcRenderer.send('window:close')
 });

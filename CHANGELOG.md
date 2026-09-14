@@ -1,5 +1,91 @@
 # Changelog
 
+## 1.9.3 — robustezza della parete, diagnosi in loco, rilevamento H.265
+
+Blocchi 1 e 2 della [ROADMAP-2.md](ROADMAP-2.md), presi da `digital195/unifi-protect-viewer`.
+
+**Il caso che prima non veniva coperto da nulla**
+
+- **Watchdog di caricamento (45s).** Un controller che completa l'handshake TCP e poi tace — NVR
+  sotto carico, firewall che fa DROP, captive portal — non emette né `did-fail-load` né
+  `did-finish-load`: nessun recupero partiva e la parete restava bianca a tempo indefinito. Ora un
+  timer armato in `loadVista()` interrompe il caricamento e riusa il percorso di recupero già
+  collaudato. Si disarma su `dom-ready`, non su `did-finish-load`: su una griglia con molte camere
+  quest'ultimo arriva tardissimo o non arriva affatto.
+- **Pagina di login rilevata.** Se il controller invalida la sessione risponde 200 con il form:
+  niente fallisce, e la parete resta su una maschera per ore. Ora finisce nel log. Solo diagnosi,
+  nessun ricaricamento automatico — combatterebbe l'operatore che sta digitando.
+
+**Lo sfondo non è più muto**
+
+`wallpaper.html` mostra codice di errore, indirizzo, nome della vista e conto alla rovescia al
+prossimo tentativo, con una spiegazione mirata per i certificati, i timeout, il DNS e la
+connessione rifiutata. I dati arrivano come query da `loadFile` e vengono scritti **solo** con
+`textContent`: la pagina gira nella finestra principale, che non ha preload. Aggiunta la CSP che
+quel file non aveva.
+
+**Diagnosi senza andare sul posto**
+
+- Log ruotato **a ogni avvio**, 5 archivi. Prima ruotava solo oltre 1 MB e teneva un solo
+  archivio: su una parete accesa da mesi la partenza che interessa era sepolta.
+- Riquadro *Diagnostica* nelle impostazioni: versioni di Electron e Chromium, vista a schermo,
+  se è in corso una riconnessione, percorsi di log e configurazione, e un pulsante che apre la
+  cartella del log. Soprattutto mostra se l'accelerazione hardware è **davvero** attiva in questo
+  avvio (`app.isHardwareAccelerationEnabled()`), non il valore scritto in configurazione: dopo
+  aver tolto la spunta senza riavviare i due differiscono, ed è il momento in cui serve saperlo.
+
+**Aggiornamento**
+
+- Guardia contro un secondo download in parallelo e istantanea del pacchetto: un controllo
+  lanciato durante lo scaricamento poteva far annunciare una versione e installarne un'altra.
+- Errori di rete classificati: DNS, firewall, proxy che ispeziona il TLS, limite di richieste
+  GitHub, 404. La nota sul repository privato resta **solo** sul 404 — prima veniva appiccicata
+  anche a "manca internet".
+- Progresso con byte e velocità (`12,4 / 91,0 MB — 0,2 MB/s`) cadenzato a 250 ms.
+- Chiudendo le impostazioni a metà, il download viene annullato e il file parziale cancellato.
+  Prima continuava in sottofondo e restava in `%TEMP%` per sempre.
+- Il dialogo di conferma non blocca più il main process e ha la finestra genitore.
+- Verifica `sha256` quando GitHub pubblica l'impronta dell'asset.
+
+**Interfaccia**
+
+- Menu contestuale con riga di stato (quale vista è a schermo, se si sta riconnettendo), spunta
+  sulla vista attiva e acceleratori mostrati senza registrarli una seconda volta.
+- Voce **Riavvia il programma**, dietro password. Passa dal logout: `app.exit()` salterebbe
+  `before-quit` e lascerebbe la sessione aperta sul controller.
+- Sfondo della finestra da `#1c2b39` a nero: è il colore che Chromium dipinge fra un documento e
+  l'altro, cioè la barra chiara che sbatteva a ogni cambio vista.
+
+**Fermato dalla revisione prima del rilascio**
+
+Una revisione avversariale sul diff ha prodotto 19 rilievi, 6 confermati da entrambe le lenti.
+Quattro erano difetti introdotti da questa stessa tornata e sono stati corretti prima di taggare:
+
+- **Il watchdog avvelenava il backoff.** Il suo callback alzava `caricamentoFallito`, flag che
+  esiste per filtrare la pagina d'errore di Chromium — che su quel percorso non viene mai
+  committata. Restava alzato fino al primo tentativo *riuscito*, che quindi usciva in anticipo
+  senza chiamare `annullaRetry()`: `retryDelay` non tornava più a zero e il guasto successivo
+  partiva da 10s salendo a 60s, per settimane.
+- **Il watchdog uccideva i controller lenti ma vivi.** Cronometrava tutto il caricamento fino a
+  `dom-ready`: un NVR carico che impiega più di 45s veniva interrotto, e con `disable-http-cache`
+  il tentativo dopo ripartiva da zero per essere interrotto di nuovo. Ora il budget riparte sul
+  commit del documento (`did-navigate`), mentre il guasto bersaglio — handshake e poi silenzio —
+  non committa nulla e continua a scattare.
+- **`svuota cache` era l'unica navigazione senza watchdog**, e ricaricava il wallpaper se era lui
+  a schermo. Ora passa da `loadVista()`.
+- **Il suggerimento sui certificati era codice morto**: `setCertificateVerifyProc` rispondeva
+  `-2`, cioè `ERR_FAILED` generico, quindi `did-fail-load` non vedeva mai un `ERR_CERT_*` e la
+  spiegazione appena scritta non poteva comparire in nessun caso. Ora restituisce l'errore vero.
+
+Più uno trovato verificando la revisione: la riga *"controller di nuovo raggiungibile"* era
+irraggiungibile, perché la guardia usava `retryTimer`, che il callback del retry azzera prima di
+caricare. Ora usa `retryDelay`, e il test lo dimostra accendendo un server a metà corsa.
+
+**Test**: 41 asserzioni sulle finestre (incluse 9 su `wallpaper.html` con URL e nome vista ostili)
+e 16 controlli sull'avvio reale — doppia esecuzione per la rotazione del log, e un controller
+finto che si accende dopo 14 secondi per verificare che il recupero riesca davvero e venga
+registrato.
+
 ## 1.9.2 — due eccezioni non gestite
 
 Completato il "blocco 0" della [ROADMAP-2.md](ROADMAP-2.md): difetti veri, nessuna funzione nuova.

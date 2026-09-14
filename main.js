@@ -1,4 +1,4 @@
-const { app, BrowserWindow, globalShortcut, dialog, Menu, ipcMain, session, screen, powerSaveBlocker } = require('electron');
+const { app, BrowserWindow, globalShortcut, dialog, Menu, ipcMain, session, screen, powerSaveBlocker, shell } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
@@ -30,6 +30,10 @@ let revealed = false;
 let retryTimer = null;
 let retryDelay = 0;
 let caricamentoFallito = false;
+let watchdogTimer = null;
+let eraSuLogin = false;
+let downloadInCorso = false;
+let rotazioneAvvioFatta = false;
 let rebootTicker = null;
 let ultimoRefresh = '';
 let blockerId = -1;
@@ -56,12 +60,28 @@ const CHROME_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit
 // --- LOG ---
 // Senza questo, i recuperi automatici (retry, riavvio del renderer, certificati rifiutati,
 // config in quarantena) avvengono in silenzio e un intervento in loco non ha nulla da leggere.
+const ARCHIVI_LOG = 5;
+
+// Shift dal piu' alto al piu' basso: partendo dal basso si sovrascriverebbe .2 con .1 prima di
+// averlo spostato, perdendo un'esecuzione.
+function ruotaArchivi() {
+  try {
+    for (let i = ARCHIVI_LOG - 1; i >= 1; i--) {
+      const da = logPath + '.' + i;
+      if (fs.existsSync(da)) fs.renameSync(da, logPath + '.' + (i + 1));
+    }
+    if (fs.existsSync(logPath)) fs.renameSync(logPath, logPath + '.1');
+  } catch (e) {}
+}
+
 function log(msg) {
   const riga = '[' + new Date().toISOString() + '] ' + msg + '\n';
   try {
-    if (fs.existsSync(logPath) && fs.statSync(logPath).size > 1048576) {
-      fs.renameSync(logPath, logPath + '.1');
-    }
+    // Ruota a ogni avvio: su una parete accesa da mesi la sequenza che interessa e' l'ultima
+    // partenza, e con un solo archivio finiva sepolta sotto un mega di righe.
+    if (!rotazioneAvvioFatta) { rotazioneAvvioFatta = true; ruotaArchivi(); }
+    // La soglia resta come rete per le sessioni che non si riavviano mai.
+    else if (fs.existsSync(logPath) && fs.statSync(logPath).size > 1048576) ruotaArchivi();
     fs.appendFileSync(logPath, riga);
   } catch (e) {}
 }
@@ -196,7 +216,10 @@ function configuraVerificaCertificati(ses) {
     }
     if (hostConfigurati().has(host)) return callback(0);
     log('CERTIFICATO RIFIUTATO per ' + host + ' (' + richiesta.verificationResult + '): host non presente fra le viste configurate');
-    callback(-2);
+    // Si restituisce l'errore vero e non -2 (ERR_FAILED generico): altrimenti did-fail-load
+    // riceve -2 e la schermata di sfondo non puo' riconoscere un problema di certificato,
+    // rendendo muto proprio il guasto piu' probabile dopo la stretta della 1.8.0.
+    callback(richiesta.errorCode || -2);
   });
 }
 
@@ -239,11 +262,48 @@ function annullaRetry() {
   retryDelay = 0;
 }
 
+function annullaWatchdog() {
+  if (watchdogTimer) { clearTimeout(watchdogTimer); watchdogTimer = null; }
+}
+
+// Un controller che completa l'handshake TCP e poi tace (NVR sotto carico, firewall che fa DROP,
+// captive portal) non emette ne' did-fail-load ne' did-finish-load: senza questo la parete resta
+// bianca a tempo indefinito. Si disarma su dom-ready, non su did-finish-load: su una griglia con
+// molte camere quest'ultimo arriva tardissimo o non arriva affatto.
+const ATTESA_CARICAMENTO_MS = 45000;
+
+function armaWatchdog() {
+  annullaWatchdog();
+  watchdogTimer = setTimeout(() => {
+    watchdogTimer = null;
+    if (!win || win.isDestroyed()) return;
+    log('nessuna risposta dopo ' + (ATTESA_CARICAMENTO_MS / 1000) + 's: interrompo e riprovo');
+    try { win.webContents.stop(); } catch (e) {}
+    // NIENTE caricamentoFallito qui: quel flag serve a filtrare la pagina d'errore che Chromium
+    // committa dopo un did-fail-load, e su questo percorso non esiste (stop() su una navigazione
+    // mai committata non emette nulla). Alzarlo faceva uscire in anticipo il did-finish-load del
+    // retry RIUSCITO, che quindi non chiamava annullaRetry(): il backoff restava avvelenato a
+    // 60s per sempre e il log non diceva mai che la parete era tornata su.
+    gestisciErroreCaricamento(-7, 'TIMEOUT');
+  }, ATTESA_CARICAMENTO_MS);
+}
+
+// Riavvio del programma. Passa dal logout come beginShutdown(): app.exit() salta 'before-quit'
+// e lascerebbe la sessione aperta sul controller.
+function riavvia() {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  log('riavvio richiesto');
+  const riparti = () => { app.relaunch(); app.exit(0); };
+  (config.logoutOnExit ? logoutUnifi({ serverSide: true }) : Promise.resolve()).catch(() => {}).then(riparti);
+}
+
 function loadVista(i) {
   const v = config.viste[i];
   if (!v || !v.url || !win || win.isDestroyed()) return;
   annullaRetry();
   vistaAttiva = i;
+  armaWatchdog();
   win.loadURL(v.url, { userAgent: CHROME_USER_AGENT });
 }
 
@@ -251,15 +311,28 @@ function loadVista(i) {
 // si mostra lo sfondo aziendale e si riprova con backoff finche' non torna su.
 function gestisciErroreCaricamento(codice, descrizione) {
   if (codice === -3) return; // ABORTED: e' una navigazione annullata, non un guasto
+  annullaWatchdog(); // il guasto e' gia' emerso, il watchdog ha finito il suo lavoro
   retryDelay = retryDelay ? Math.min(retryDelay * 2, 60000) : 5000;
+  const vistaCorrente = config.viste[vistaAttiva];
   log('caricamento fallito (' + codice + ' ' + descrizione + '), riprovo fra ' + (retryDelay / 1000) + 's');
-  if (win && !win.isDestroyed()) { win.loadFile('wallpaper.html').catch(() => {}); }
+  if (win && !win.isDestroyed()) {
+    // Lo sfondo non e' piu' muto: codice, indirizzo e attesa arrivano alla pagina come query.
+    win.loadFile('wallpaper.html', {
+      query: {
+        errore: codice + ' ' + descrizione,
+        url: (vistaCorrente && vistaCorrente.url) || '',
+        vista: (vistaCorrente && vistaCorrente.nome) || String(vistaAttiva),
+        riprovo: String(retryDelay / 1000)
+      }
+    }).catch(() => {});
+  }
   if (retryTimer) clearTimeout(retryTimer);
   retryTimer = setTimeout(() => {
     retryTimer = null;
     const v = config.viste[vistaAttiva];
     if (!v || !v.url || !win || win.isDestroyed()) { log('tentativo annullato: vista o finestra non disponibili'); return; }
     log('nuovo tentativo su ' + v.url);
+    armaWatchdog();
     win.loadURL(v.url, { userAgent: CHROME_USER_AGENT });
   }, retryDelay);
 }
@@ -463,7 +536,9 @@ ipcMain.handle('settings:import', (event) => {
 ipcMain.handle('settings:clear-cache', async (event) => {
   if (!mittenteAutorizzato(event)) return { ok: false, message: 'Richiesta non valida' };
   await getUnifiSession().clearCache();
-  if (win && !win.isDestroyed()) win.reload();
+  // loadVista e non reload(): reload ricaricherebbe il wallpaper se e' lui a schermo, e sarebbe
+  // l'unica navigazione principale senza watchdog, proprio sul percorso che usa il tecnico.
+  loadVista(vistaAttiva);
   return { ok: true, message: 'Cache svuotata e pagina ricaricata.' };
 });
 
@@ -494,12 +569,38 @@ function richiestaHttps(url, redirezioniRimaste) {
         if (redirezioniRimaste <= 0) return reject(new Error('troppi redirect'));
         return resolve(richiestaHttps(res.headers.location, redirezioniRimaste - 1));
       }
-      if (res.statusCode !== 200) { res.resume(); return reject(new Error('HTTP ' + res.statusCode)); }
+      if (res.statusCode !== 200) {
+        res.resume();
+        // Lo stato e gli header servono a spiegaErroreRete: senza, ogni guasto diventa una
+        // stringa generica e l'operatore va a cercare il problema dalla parte sbagliata.
+        const err = new Error('HTTP ' + res.statusCode);
+        err.statusCode = res.statusCode;
+        err.headers = res.headers;
+        return reject(err);
+      }
       resolve(res);
     });
     req.on('error', reject);
-    req.setTimeout(20000, () => req.destroy(new Error('timeout di rete')));
+    req.setTimeout(20000, () => req.destroy(Object.assign(new Error('timeout di rete'), { code: 'ETIMEDOUT' })));
   });
+}
+
+// Traduce il guasto in una frase che dice dove guardare. La nota sul repository privato resta
+// solo sul 404: prima veniva appiccicata a qualunque errore, compreso "manca internet".
+function spiegaErroreRete(e) {
+  const codice = e && e.code;
+  const stato = e && e.statusCode;
+  if (codice === 'ENOTFOUND' || codice === 'EAI_AGAIN') return 'nessuna risoluzione DNS per github.com: il PC non ha uscita internet o manca il DNS.';
+  if (codice === 'ETIMEDOUT' || codice === 'ECONNRESET' || codice === 'ECONNREFUSED') return 'connessione a github.com non riuscita: probabile firewall o proxy della rete del cliente.';
+  if (/CERT|SSL/i.test(String(e && e.message))) return 'certificato di github.com non valido: di solito e\' un proxy che ispeziona il traffico.';
+  if (stato === 404) return 'release non trovata: verifica il nome del repository, e ricorda che le release di un repository privato non sono raggiungibili senza autenticazione.';
+  if (stato === 403) {
+    const restanti = e.headers && e.headers['x-ratelimit-remaining'];
+    if (String(restanti) === '0') return 'limite di richieste di GitHub raggiunto: riprova fra un\'ora.';
+    return 'accesso negato da GitHub (403).';
+  }
+  if (stato) return 'GitHub ha risposto ' + stato + '.';
+  return String((e && e.message) || e);
 }
 
 async function leggiJson(url) {
@@ -518,6 +619,9 @@ function confrontaVersioni(a, b) {
 
 ipcMain.handle('update:check', async (event) => {
   if (!mittenteAutorizzato(event)) return { ok: false, message: 'Richiesta non valida' };
+  // Un secondo controllo durante un download riscriverebbe aggiornamentoPronto sotto i piedi
+  // di update:install, che poi annuncerebbe una versione e ne installerebbe un'altra.
+  if (downloadInCorso) return { ok: false, message: 'C\'e\' gia\' un download in corso.' };
   const repo = String(config.repoAggiornamenti || '');
   if (!/^[\w.-]+\/[\w.-]+$/.test(repo)) return { ok: false, message: 'Repository di aggiornamento non valido: ' + repo };
   try {
@@ -530,56 +634,102 @@ ipcMain.handle('update:check', async (event) => {
       return { ok: true, aggiornamento: false, message: 'Gia\' aggiornato: hai la ' + app.getVersion() + ', l\'ultima pubblicata e\' la ' + versione + '.' };
     }
     if (!asset) return { ok: false, message: 'La release ' + versione + ' non contiene un installer .exe' };
-    aggiornamentoPronto = { versione, url: asset.browser_download_url, nome: asset.name, dimensione: asset.size };
+    aggiornamentoPronto = {
+      versione, url: asset.browser_download_url, nome: asset.name, dimensione: asset.size,
+      digest: String(asset.digest || '') // GitHub lo espone come "sha256:<hex>" sulle release recenti
+    };
     log('aggiornamento disponibile: ' + versione);
     return { ok: true, aggiornamento: true, versione, dimensione: asset.size, message: 'Disponibile la versione ' + versione + ' (' + Math.round(asset.size / 1048576) + ' MB). Hai la ' + app.getVersion() + '.' };
   } catch (e) {
-    return { ok: false, message: 'Controllo fallito: ' + e.message + ' (se il repository e\' privato le release non sono raggiungibili senza autenticazione)' };
+    log('controllo aggiornamenti fallito: ' + e.message);
+    return { ok: false, message: 'Controllo fallito: ' + spiegaErroreRete(e) };
   }
 });
 
 ipcMain.handle('update:install', async (event) => {
   if (!mittenteAutorizzato(event)) return { ok: false, message: 'Richiesta non valida' };
-  if (!aggiornamentoPronto) return { ok: false, message: 'Nessun aggiornamento pronto: esegui prima il controllo.' };
-  const dest = path.join(app.getPath('temp'), aggiornamentoPronto.nome);
+  if (downloadInCorso) return { ok: false, message: 'C\'e\' gia\' un download in corso.' };
+  // Istantanea: aggiornamentoPronto e' una variabile di modulo e un secondo controllo potrebbe
+  // riscriverla mentre scarichiamo. Da qui in poi si usa solo il pacchetto congelato.
+  const pacchetto = aggiornamentoPronto;
+  if (!pacchetto) return { ok: false, message: 'Nessun aggiornamento pronto: esegui prima il controllo.' };
+
+  const finestra = BrowserWindow.fromWebContents(event.sender);
+  const dest = path.join(app.getPath('temp'), pacchetto.nome);
+  let annullato = false;
+  downloadInCorso = true;
   try {
-    const res = await richiestaHttps(aggiornamentoPronto.url, 5);
-    const totale = parseInt(res.headers['content-length'], 10) || aggiornamentoPronto.dimensione || 0;
+    const res = await richiestaHttps(pacchetto.url, 5);
+    const totale = parseInt(res.headers['content-length'], 10) || pacchetto.dimensione || 0;
+    const sha = crypto.createHash('sha256');
     let scaricati = 0;
-    let ultimaPct = -1;
+    let ultimoInvio = 0;
+    let istanteMisura = Date.now();
+    let byteMisura = 0;
     await new Promise((resolve, reject) => {
       const out = fs.createWriteStream(dest);
+      // Chiudendo le impostazioni a meta' il download continuava in sottofondo e il file
+      // incompleto restava in %TEMP% per sempre, perche' su Windows l'unlink di uno stream
+      // ancora aperto fallisce con EBUSY.
+      const suChiusuraFinestra = () => {
+        annullato = true;
+        try { res.destroy(); } catch (e) {}
+        try { out.destroy(); } catch (e) {}
+        reject(new Error('download annullato: finestra chiusa'));
+      };
+      if (finestra) finestra.once('closed', suChiusuraFinestra);
+      const pulisci = () => { if (finestra && !finestra.isDestroyed()) finestra.removeListener('closed', suChiusuraFinestra); };
+
       res.on('data', (c) => {
         scaricati += c.length;
-        const pct = totale ? Math.floor(scaricati * 100 / totale) : 0;
-        if (pct !== ultimaPct) {
-          ultimaPct = pct;
-          if (!event.sender.isDestroyed()) event.sender.send('update:progress', pct);
+        sha.update(c);
+        const ora = Date.now();
+        // Cadenza a 250 ms invece che a ogni punto percentuale: fino a cento invii in meno, e
+        // su una linea lenta servono i byte e la velocita', non una percentuale che non si muove.
+        if (ora - ultimoInvio >= 250) {
+          const bps = (scaricati - byteMisura) * 1000 / Math.max(1, ora - istanteMisura);
+          ultimoInvio = ora; istanteMisura = ora; byteMisura = scaricati;
+          if (!event.sender.isDestroyed()) {
+            event.sender.send('update:progress', { pct: totale ? Math.floor(scaricati * 100 / totale) : 0, scaricati, totale, bps });
+          }
         }
       });
-      res.on('error', reject);
-      out.on('error', reject);
-      out.on('finish', resolve);
+      res.on('error', (e) => { pulisci(); reject(e); });
+      out.on('error', (e) => { pulisci(); reject(e); });
+      out.on('finish', () => { pulisci(); resolve(); });
       res.pipe(out);
     });
+
     // Un download troncato da un proxy inizia comunque per MZ e supererebbe il controllo sotto:
     // verrebbe installato sopra un'app funzionante, su una macchina che magari e' lontana.
-    if (totale && scaricati !== totale) {
-      try { fs.unlinkSync(dest); } catch (e2) {}
-      throw new Error('download incompleto: ' + scaricati + ' byte su ' + totale);
+    if (totale && scaricati !== totale) throw new Error('download incompleto: ' + scaricati + ' byte su ' + totale);
+
+    // GitHub pubblica l'impronta solo sulle release recenti: si confronta unicamente se c'e',
+    // altrimenti un controllo incondizionato bloccherebbe ogni aggiornamento dalle vecchie.
+    const atteso = String(pacchetto.digest || '');
+    if (atteso.toLowerCase().indexOf('sha256:') === 0) {
+      const calcolato = sha.digest('hex');
+      if (calcolato !== atteso.slice(7).toLowerCase()) throw new Error('impronta sha256 non corrispondente');
+      log('sha256 dell\'installer verificato');
     }
+
     // Controllo minimo: deve essere un eseguibile Windows, non una pagina di errore salvata.
     const testa = Buffer.alloc(2);
     const fd = fs.openSync(dest, 'r');
     try { fs.readSync(fd, testa, 0, 2, 0); } finally { fs.closeSync(fd); }
-    if (testa.toString('latin1') !== 'MZ') { fs.unlinkSync(dest); throw new Error('il file scaricato non e\' un eseguibile'); }
+    if (testa.toString('latin1') !== 'MZ') throw new Error('il file scaricato non e\' un eseguibile');
 
-    const scelta = dialog.showMessageBoxSync({
+    // showMessageBoxSync senza genitore blocca il loop del main (niente retry, niente ticker del
+    // refresh, niente riallineamento display finche' nessuno clicca) e lascia la finestra
+    // genitore disabilitata al mouse. La forma asincrona con genitore evita entrambi.
+    const opzioni = {
       type: 'question', buttons: ['Installa e chiudi', 'Annulla'], defaultId: 0, cancelId: 1,
-      title: 'Aggiornamento', message: 'Installare la versione ' + aggiornamentoPronto.versione + '?',
+      title: 'Aggiornamento', message: 'Installare la versione ' + pacchetto.versione + '?',
       detail: 'Il programma si chiude e parte l\'installer.\nWindows chiedera\' i permessi di amministratore.\n\n' + dest
-    });
-    if (scelta !== 0) return { ok: true, message: 'Installazione annullata. L\'installer resta in ' + dest };
+    };
+    const genitore = (finestra && !finestra.isDestroyed()) ? finestra : ((win && !win.isDestroyed()) ? win : null);
+    const risposta = genitore ? await dialog.showMessageBox(genitore, opzioni) : await dialog.showMessageBox(opzioni);
+    if (risposta.response !== 0) return { ok: true, message: 'Installazione annullata. L\'installer resta in ' + dest };
 
     log('avvio installer ' + dest);
     const installer = spawn(dest, [], { detached: true, stdio: 'ignore' });
@@ -600,11 +750,57 @@ ipcMain.handle('update:install', async (event) => {
     installer.unref();
     shuttingDown = true; // l'installer deve poter sostituire i file: si esce senza passare dal logout
     setTimeout(() => app.exit(0), 1000);
-    return { ok: true, message: 'Installer avviato, il programma si chiude.' };
+    // avviato:true e' l'unico caso in cui la pagina NON deve riabilitare il bottone: stiamo
+    // chiudendo. Su ogni altro esito, annullamento compreso, l'interfaccia torna utilizzabile.
+    return { ok: true, avviato: true, message: 'Installer avviato, il programma si chiude.' };
   } catch (e) {
+    // Qualunque sia il guasto, il file parziale non deve restare in giro: al prossimo giro
+    // verrebbe riscaricato sopra, e nel frattempo occupa spazio senza servire a niente.
+    try { fs.unlinkSync(dest); } catch (e2) {}
+    if (annullato) { log('download annullato dall\'utente'); return { ok: false, message: 'Download annullato.' }; }
     log('aggiornamento fallito: ' + e.message);
-    return { ok: false, message: 'Aggiornamento fallito: ' + e.message };
+    return { ok: false, message: 'Aggiornamento fallito: ' + spiegaErroreRete(e) };
+  } finally {
+    // Senza il finally un errore di rete bloccherebbe gli aggiornamenti fino al riavvio.
+    downloadInCorso = false;
   }
+});
+
+// --- DIAGNOSTICA ---
+// Su un kiosk il log va cercato a memoria in %APPDATA%, e la casella "accelerazione hardware"
+// mostrava il valore scritto in config, non se abbia davvero avuto effetto.
+ipcMain.handle('diagnostica:get', (event) => {
+  if (!mittenteAutorizzato(event)) return null;
+  const v = config.viste[vistaAttiva];
+  return {
+    accelerazioneAttiva: app.isHardwareAccelerationEnabled(),
+    electron: process.versions.electron,
+    chrome: process.versions.chrome,
+    logPath,
+    configPath,
+    vistaAttiva,
+    nomeVistaAttiva: (v && v.nome) || String(vistaAttiva),
+    riconnessioneInCorso: !!retryTimer
+  };
+});
+
+ipcMain.handle('diagnostica:apri-log', (event) => {
+  if (!mittenteAutorizzato(event)) return { ok: false, message: 'Richiesta non valida' };
+  // Volutamente diverso dal riferimento: il percorso non arriva dal renderer, si usa la
+  // costante di modulo. showItemInFolder e' piu' affidabile di openPath su un .log senza
+  // applicazione associata.
+  if (!fs.existsSync(logPath)) return { ok: false, message: 'Il file di log non esiste ancora.' };
+  shell.showItemInFolder(logPath);
+  return { ok: true, message: 'Cartella del log aperta.' };
+});
+
+// Il main process non puo' interrogare MediaSource: la rilevazione dei codec la fa la pagina
+// impostazioni e la manda qui solo per finire nel log, cosi' basta il log per capire perche' su
+// una certa postazione le telecamere H.265 restano nere.
+ipcMain.on('diagnostica:codec', (event, dati) => {
+  if (!mittenteAutorizzato(event) || !dati) return;
+  log('codec supportati dal PC: H.264=' + !!dati.h264 + ' H.265=' + !!dati.h265 +
+      (dati.h265 ? (' (accelerazione: ' + (dati.h265Accelerato ? 'si' : 'no') + ')') : ''));
 });
 
 ipcMain.on('window:close', (event) => {
@@ -697,18 +893,40 @@ async function createWindows() {
 
   win = new BrowserWindow({
     width: 1280, height: 720, title: 'UniFi Protect Monitor', autoHideMenuBar: true, icon: iconPath,
-    show: false, backgroundColor: '#1c2b39', fullscreen: config.avvioFullScreen,
+    show: false, backgroundColor: '#000000', fullscreen: config.avvioFullScreen,
     // Nessun preload qui: la pagina del controller non deve avere alcun ponte verso il main process.
     webPreferences: { nodeIntegration: false, contextIsolation: true, partition: UNIFI_PARTITION }
   });
 
   win.webContents.setWindowOpenHandler(({ url }) => { log('popup bloccato: ' + url); return { action: 'deny' }; });
 
+  // dom-ready arriva appena il documento e' utilizzabile: e' il segnale giusto per dire che il
+  // controller ha risposto. did-finish-load aspetta anche le immagini di tutte le camere.
+  win.webContents.on('dom-ready', () => { annullaWatchdog(); });
+
   win.webContents.on('did-fail-load', (e, codice, descrizione, url, isMainFrame) => {
     if (!isMainFrame) return;
     if (codice === -3) return; // ABORTED: navigazione annullata, non un guasto
+    annullaWatchdog();
     caricamentoFallito = true;
     gestisciErroreCaricamento(codice, descrizione);
+  });
+
+  // Se il controller invalida la sessione risponde 200 con il form di login: nulla fallisce e la
+  // parete resta su una maschera per ore senza che il log dica niente. Solo diagnosi, nessun
+  // ricaricamento automatico: combatterebbe l'operatore che sta digitando le credenziali.
+  win.webContents.on('did-navigate', (e, url) => {
+    // Il documento e' stato committato: il controller ha risposto, quindi il budget del watchdog
+    // riparte da capo. Senza questo un NVR lento ma vivo (HTML + script pesanti oltre i 45s)
+    // veniva ucciso da stop(), e con disable-http-cache il tentativo dopo ripartiva da zero per
+    // essere ucciso di nuovo: il backoff si inchiodava a 60s e il ciclo non convergeva mai.
+    // Il guasto bersaglio — handshake TCP e poi silenzio — non committa nulla, quindi qui non
+    // passa e i 45s scattano come previsto.
+    if (!String(url).startsWith('file://')) armaWatchdog();
+
+    const suLogin = /\/login(\?|$)|\/signin/i.test(String(url));
+    if (suLogin && !eraSuLogin) log('ATTENZIONE: la vista ' + vistaAttiva + ' e\' finita sulla pagina di login (' + url + ')');
+    eraSuLogin = suLogin;
   });
 
   win.webContents.on('did-finish-load', () => {
@@ -720,7 +938,9 @@ async function createWindows() {
     // guardia il tentativo appena programmato veniva cancellato ~5 ms dopo e il recupero non
     // ripartiva mai: il backoff 5/10/20/40/60s era solo una riga di log (bug dalla 1.7.1).
     if (caricamentoFallito) { caricamentoFallito = false; return; }
-    if (retryTimer) log('controller di nuovo raggiungibile');
+    // retryTimer e' gia' null qui (lo azzera il callback del retry prima di caricare):
+    // la spia di un recupero in corso e' retryDelay, che resta al valore dell'ultimo backoff.
+    if (retryDelay) log('controller di nuovo raggiungibile dopo ' + (retryDelay / 1000) + 's di attesa');
     log('pagina caricata: ' + urlCaricato);
     annullaRetry();
   });
@@ -738,12 +958,36 @@ async function createWindows() {
   win.on('close', (e) => { if (!shuttingDown && config.logoutOnExit) { e.preventDefault(); beginShutdown(); } });
 
   win.webContents.on('context-menu', () => {
-    const menuTemplate = [{ label: '⚙️ Impostazioni', click: () => checkPassword(openSettings) }, { type: 'separator' }];
-    [1,2,3,4,5,6,7,8,9].forEach(i => { if (config.viste[i] && config.viste[i].attiva) menuTemplate.push({ label: `🎥 ${config.viste[i].nome} (Ctrl+${i})`, click: () => loadVista(i) }); });
-    if (config.viste[0] && config.viste[0].attiva) { menuTemplate.push({ type: 'separator' }, { label: `📂 ${config.viste[0].nome} (Ctrl+0)`, click: () => loadVista(0) }); }
+    // Riga di stato: quale vista e' a schermo e se si sta riconnettendo. La guardia sulla vista
+    // serve perche' dopo un salvataggio puo' essere svuotata, e il menu andrebbe in eccezione
+    // proprio quando lo si apre per capire cosa non va.
+    const attiva = config.viste[vistaAttiva];
+    const nomeAttiva = (attiva && attiva.nome) || ('Vista ' + vistaAttiva);
+    const menuTemplate = [
+      { label: nomeAttiva + (retryTimer ? ' — riconnessione in corso…' : ' — connessa'), enabled: false },
+      { type: 'separator' },
+      { label: '⚙️ Impostazioni', click: () => checkPassword(openSettings) },
+      { type: 'separator' }
+    ];
+    // registerAccelerator:false e' obbligatorio: senza, Electron registrerebbe gli acceleratori
+    // sopra a quelli gia' presi da registraScorciatoie().
+    [1,2,3,4,5,6,7,8,9].forEach(i => {
+      if (!config.viste[i] || !config.viste[i].attiva) return;
+      menuTemplate.push({
+        label: `🎥 ${config.viste[i].nome}`, type: 'checkbox', checked: i === vistaAttiva,
+        accelerator: `CommandOrControl+${i}`, registerAccelerator: false, click: () => loadVista(i)
+      });
+    });
+    if (config.viste[0] && config.viste[0].attiva) {
+      menuTemplate.push({ type: 'separator' }, {
+        label: `📂 ${config.viste[0].nome}`, type: 'checkbox', checked: vistaAttiva === 0,
+        accelerator: 'CommandOrControl+0', registerAccelerator: false, click: () => loadVista(0)
+      });
+    }
     menuTemplate.push({ type: 'separator' },
       { label: '🔄 Ricarica', click: () => loadVista(vistaAttiva) },
-      { label: '🔓 Disconnetti account', click: async () => { await logoutUnifi({ serverSide: true }); loadVista(vistaAttiva); } });
+      { label: '🔓 Disconnetti account', click: async () => { await logoutUnifi({ serverSide: true }); loadVista(vistaAttiva); } },
+      { label: '♻️ Riavvia il programma', click: () => checkPassword(riavvia) });
     menuTemplate.push({ type: 'separator' },
       { label: win.isFullScreen() ? '🖥 Esci Full Screen' : '📺 Vai Full Screen', click: () => win.setFullScreen(!win.isFullScreen()) },
       { label: '❌ Chiudi', click: () => app.quit() });
@@ -768,6 +1012,7 @@ app.on('will-quit', () => {
   globalShortcut.unregisterAll();
   if (rebootTicker) clearInterval(rebootTicker);
   if (displayTimer) { clearTimeout(displayTimer); displayTimer = null; }
+  annullaWatchdog();
   annullaRetry();
   if (blockerId !== -1 && powerSaveBlocker.isStarted(blockerId)) powerSaveBlocker.stop(blockerId);
 });

@@ -111,11 +111,23 @@ essere sovrascritto in silenzio con i valori di fabbrica.
 - `icona1.ico` non è referenziato dal codice: resta impacchettato come asset storico.
   `wallpaper.html` / `wallpaper.png` sono la schermata mostrata quando il controller è irraggiungibile.
 
+## Diagnosi di un impianto
+
+Quando una parete non mostra quello che dovrebbe, in ordine:
+
+1. **F10 → Diagnostica**: dice quale vista è a schermo, se è in corso una riconnessione, se
+   l'accelerazione hardware è davvero attiva in questo avvio, e apre la cartella del log.
+2. **Lo sfondo stesso**: quando il controller non risponde, la schermata mostra codice di errore,
+   indirizzo, e un suggerimento mirato (certificato, timeout, DNS, connessione rifiutata).
+3. **`monitor.log`**: ruotato a ogni avvio, 5 archivi (`monitor.log.1` … `.5`). Contiene i cambi di
+   vista, i caricamenti falliti con il backoff, i certificati rifiutati e con quale host, i cambi di
+   monitor con risoluzione e scala, e l'avvertimento se una vista finisce sulla pagina di login.
+
 ## Test
 
 ```bash
-npm test           # 27 asserzioni sulle finestre di servizio, in finestre nascoste
-npm run test:avvio # avvia il main process in una userData temporanea e ne verifica il log
+npm test           # 40 asserzioni sulle finestre di servizio, in finestre nascoste
+npm run test:avvio # avvia due volte il main process in una userData temporanea e verifica il log
 ```
 
 Girano entrambi in CI prima del packaging, insieme a `node --check` su tutti i sorgenti.
