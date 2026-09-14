@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.8.0 — correzione bug
+## 1.7.1 — correzione bug
 
 Batch di fix dalla [ROADMAP.md](ROADMAP.md), sezione "quick wins".
 
