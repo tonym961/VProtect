@@ -2,6 +2,8 @@ const { app, BrowserWindow, globalShortcut, dialog, Menu, ipcMain, session, scre
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
+const https = require('https');
+const { spawn } = require('child_process');
 
 // Una sola istanza: due processi che scrivono viste_config.json si sovrascrivono a vicenda.
 if (!app.requestSingleInstanceLock()) { app.exit(0); }
@@ -74,6 +76,9 @@ const defaultConfig = {
   logoutOnExit: true,   // alla chiusura disconnette l'account UniFi
   logoutOnStart: true,  // all'avvio ripulisce comunque la sessione (copre crash e mancanza di corrente)
   accettaTuttiICertificati: false,
+  riallineaSuCambioDisplay: true,
+  accelerazioneHardware: true,
+  repoAggiornamenti: 'tonym961/VProtect',
   viste: {}
 };
 
@@ -97,6 +102,13 @@ if (fs.existsSync(configPath)) {
 }
 // Config di versioni precedenti possono avere viste mancanti: completa i buchi.
 for (let i = 0; i <= 9; i++) { if (!config.viste[i]) config.viste[i] = defaultConfig.viste[i]; }
+
+// Via di fuga per il flicker: va deciso prima che l'app sia pronta, quindi sta qui e non
+// nelle impostazioni a caldo (richiede un riavvio del programma per avere effetto).
+if (!config.accelerazioneHardware) {
+  app.disableHardwareAcceleration();
+  log('accelerazione hardware disattivata da configurazione');
+}
 
 // Scrittura atomica: tmp + fsync + rename. Il rename su NTFS e' atomico, quindi un blackout
 // a meta' scrittura lascia il file vecchio intatto invece di produrne uno troncato.
@@ -266,6 +278,48 @@ function armaRefreshProgrammato() {
   }, 60000);
 }
 
+// --- CAMBIO DI USCITA VIDEO (DisplayPort <-> HDMI) ---
+// Passando da un'uscita all'altra Windows emette una raffica di eventi e per qualche istante la
+// geometria e' incoerente: e' in quella finestra che si vede lo sfarfallio. Inoltre la finestra
+// resta con i bounds del monitor precedente, e soprattutto l'interfaccia di Protect calcola la
+// griglia delle camere AL CARICAMENTO: senza un reload resta dimensionata sulla vecchia
+// risoluzione anche quando la finestra e' gia' giusta.
+let displayTimer = null;
+
+function riallineaAlDisplay(motivo) {
+  if (!config.riallineaSuCambioDisplay) return;
+  if (!win || win.isDestroyed()) return;
+  if (displayTimer) clearTimeout(displayTimer);
+  displayTimer = setTimeout(() => {
+    displayTimer = null;
+    if (!win || win.isDestroyed()) return;
+    const target = screen.getDisplayMatching(win.getBounds());
+    const eraFullScreen = win.isFullScreen();
+    log('display cambiato (' + motivo + '): ' + target.bounds.width + 'x' + target.bounds.height +
+        ' @' + target.scaleFactor + 'x, fullscreen=' + eraFullScreen + ' -> riallineo');
+    if (eraFullScreen) win.setFullScreen(false);
+    const area = target.workArea;
+    const attuale = win.getBounds();
+    win.setBounds({
+      x: area.x, y: area.y,
+      width: Math.min(attuale.width, area.width),
+      height: Math.min(attuale.height, area.height)
+    });
+    setTimeout(() => {
+      if (!win || win.isDestroyed()) return;
+      if (eraFullScreen) win.setFullScreen(true);
+      // Il reload e' la parte che fa riadattare davvero la griglia alla nuova risoluzione.
+      setTimeout(() => { if (win && !win.isDestroyed()) loadVista(vistaAttiva); }, 600);
+    }, 400);
+  }, 2000); // attende che la raffica di eventi si assesti
+}
+
+function ascoltaCambiDisplay() {
+  screen.on('display-added', () => riallineaAlDisplay('monitor aggiunto'));
+  screen.on('display-removed', () => riallineaAlDisplay('monitor rimosso'));
+  screen.on('display-metrics-changed', (e, display, cambiate) => riallineaAlDisplay('metriche ' + (cambiate || []).join('/')));
+}
+
 function aggiornaBloccoStandby() {
   if (config.impedisciStandby) {
     if (blockerId === -1 || !powerSaveBlocker.isStarted(blockerId)) {
@@ -310,6 +364,8 @@ ipcMain.handle('settings:get', (event) => {
     logoutOnExit: config.logoutOnExit,
     logoutOnStart: config.logoutOnStart,
     accettaTuttiICertificati: config.accettaTuttiICertificati,
+    riallineaSuCambioDisplay: config.riallineaSuCambioDisplay,
+    accelerazioneHardware: config.accelerazioneHardware,
     versione: app.getVersion()
   };
 });
@@ -330,12 +386,17 @@ ipcMain.handle('settings:save', (event, d) => {
   config.logoutOnExit = !!d.logoutOnExit;
   config.logoutOnStart = !!d.logoutOnStart;
   config.accettaTuttiICertificati = !!d.accettaTuttiICertificati;
+  config.riallineaSuCambioDisplay = !!d.riallineaSuCambioDisplay;
+  const accelerazionePrima = config.accelerazioneHardware;
+  config.accelerazioneHardware = !!d.accelerazioneHardware;
+  const serveRiavvio = accelerazionePrima !== config.accelerazioneHardware;
   const ok = saveConfig();
   armaRefreshProgrammato(); // l'orario nuovo deve valere subito, non dal prossimo avvio
   aggiornaBloccoStandby();
   registraScorciatoie();
   log('configurazione salvata (esito: ' + ok + ')');
-  return { ok, message: ok ? 'Salvato.' : 'SALVATAGGIO FALLITO — le modifiche valgono solo fino alla chiusura.' };
+  if (!ok) return { ok: false, message: 'SALVATAGGIO FALLITO — le modifiche valgono solo fino alla chiusura.' };
+  return { ok: true, message: serveRiavvio ? 'Salvato. L\'accelerazione hardware cambia solo al prossimo avvio del programma.' : 'Salvato.' };
 });
 
 ipcMain.handle('settings:change-password', (event, d) => {
@@ -408,6 +469,119 @@ ipcMain.handle('settings:logout', async (event) => {
   await logoutUnifi({ serverSide: true });
   loadVista(vistaAttiva);
   return { ok: true, message: 'Account disconnesso: al prossimo caricamento verranno richieste le credenziali.' };
+});
+
+// --- AGGIORNAMENTO MANUALE ---
+// Scarica l'installer dalla release GitHub e lo lancia. Nessuna dipendenza runtime aggiunta,
+// nessun controllo automatico in background: parte solo da un click nelle impostazioni.
+const HOST_AGGIORNAMENTI = ['api.github.com', 'github.com', 'objects.githubusercontent.com', 'release-assets.githubusercontent.com'];
+let aggiornamentoPronto = null;
+
+function richiestaHttps(url, redirezioniRimaste) {
+  return new Promise((resolve, reject) => {
+    let u;
+    try { u = new URL(url); } catch (e) { return reject(new Error('URL non valido')); }
+    // Solo HTTPS e solo verso gli host delle release: una config manomessa non puo' far
+    // scaricare un eseguibile da un posto qualsiasi.
+    if (u.protocol !== 'https:') return reject(new Error('solo HTTPS, ricevuto ' + u.protocol));
+    if (HOST_AGGIORNAMENTI.indexOf(u.hostname) === -1) return reject(new Error('host non consentito: ' + u.hostname));
+    const req = https.get(u, { headers: { 'User-Agent': 'UniFi-Protect-Monitor', 'Accept': 'application/vnd.github+json' } }, (res) => {
+      if ([301, 302, 303, 307, 308].indexOf(res.statusCode) !== -1) {
+        res.resume();
+        if (redirezioniRimaste <= 0) return reject(new Error('troppi redirect'));
+        return resolve(richiestaHttps(res.headers.location, redirezioniRimaste - 1));
+      }
+      if (res.statusCode !== 200) { res.resume(); return reject(new Error('HTTP ' + res.statusCode)); }
+      resolve(res);
+    });
+    req.on('error', reject);
+    req.setTimeout(20000, () => req.destroy(new Error('timeout di rete')));
+  });
+}
+
+async function leggiJson(url) {
+  const res = await richiestaHttps(url, 5);
+  const pezzi = [];
+  for await (const p of res) pezzi.push(p);
+  return JSON.parse(Buffer.concat(pezzi).toString('utf8'));
+}
+
+function confrontaVersioni(a, b) {
+  const pa = String(a).replace(/^v/, '').split('.').map(n => parseInt(n, 10) || 0);
+  const pb = String(b).replace(/^v/, '').split('.').map(n => parseInt(n, 10) || 0);
+  for (let i = 0; i < 3; i++) { if ((pa[i] || 0) !== (pb[i] || 0)) return (pa[i] || 0) - (pb[i] || 0); }
+  return 0;
+}
+
+ipcMain.handle('update:check', async (event) => {
+  if (!mittenteAutorizzato(event)) return { ok: false, message: 'Richiesta non valida' };
+  const repo = String(config.repoAggiornamenti || '');
+  if (!/^[\w.-]+\/[\w.-]+$/.test(repo)) return { ok: false, message: 'Repository di aggiornamento non valido: ' + repo };
+  try {
+    const dati = await leggiJson('https://api.github.com/repos/' + repo + '/releases/latest');
+    const versione = String(dati.tag_name || '').replace(/^v/, '');
+    const asset = (dati.assets || []).filter(a => /\.exe$/i.test(a.name))[0];
+    if (!versione) return { ok: false, message: 'La risposta non contiene una versione' };
+    if (confrontaVersioni(versione, app.getVersion()) <= 0) {
+      aggiornamentoPronto = null;
+      return { ok: true, aggiornamento: false, message: 'Gia\' aggiornato: hai la ' + app.getVersion() + ', l\'ultima pubblicata e\' la ' + versione + '.' };
+    }
+    if (!asset) return { ok: false, message: 'La release ' + versione + ' non contiene un installer .exe' };
+    aggiornamentoPronto = { versione, url: asset.browser_download_url, nome: asset.name, dimensione: asset.size };
+    log('aggiornamento disponibile: ' + versione);
+    return { ok: true, aggiornamento: true, versione, dimensione: asset.size, message: 'Disponibile la versione ' + versione + ' (' + Math.round(asset.size / 1048576) + ' MB). Hai la ' + app.getVersion() + '.' };
+  } catch (e) {
+    return { ok: false, message: 'Controllo fallito: ' + e.message + ' (se il repository e\' privato le release non sono raggiungibili senza autenticazione)' };
+  }
+});
+
+ipcMain.handle('update:install', async (event) => {
+  if (!mittenteAutorizzato(event)) return { ok: false, message: 'Richiesta non valida' };
+  if (!aggiornamentoPronto) return { ok: false, message: 'Nessun aggiornamento pronto: esegui prima il controllo.' };
+  const dest = path.join(app.getPath('temp'), aggiornamentoPronto.nome);
+  try {
+    const res = await richiestaHttps(aggiornamentoPronto.url, 5);
+    const totale = parseInt(res.headers['content-length'], 10) || aggiornamentoPronto.dimensione || 0;
+    let scaricati = 0;
+    let ultimaPct = -1;
+    await new Promise((resolve, reject) => {
+      const out = fs.createWriteStream(dest);
+      res.on('data', (c) => {
+        scaricati += c.length;
+        const pct = totale ? Math.floor(scaricati * 100 / totale) : 0;
+        if (pct !== ultimaPct) {
+          ultimaPct = pct;
+          if (!event.sender.isDestroyed()) event.sender.send('update:progress', pct);
+        }
+      });
+      res.on('error', reject);
+      out.on('error', reject);
+      out.on('finish', resolve);
+      res.pipe(out);
+    });
+    // Controllo minimo: deve essere un eseguibile Windows, non una pagina di errore salvata.
+    const testa = Buffer.alloc(2);
+    const fd = fs.openSync(dest, 'r');
+    try { fs.readSync(fd, testa, 0, 2, 0); } finally { fs.closeSync(fd); }
+    if (testa.toString('latin1') !== 'MZ') { fs.unlinkSync(dest); throw new Error('il file scaricato non e\' un eseguibile'); }
+
+    const scelta = dialog.showMessageBoxSync({
+      type: 'question', buttons: ['Installa e chiudi', 'Annulla'], defaultId: 0, cancelId: 1,
+      title: 'Aggiornamento', message: 'Installare la versione ' + aggiornamentoPronto.versione + '?',
+      detail: 'Il programma si chiude e parte l\'installer.\nWindows chiedera\' i permessi di amministratore.\n\n' + dest
+    });
+    if (scelta !== 0) return { ok: true, message: 'Installazione annullata. L\'installer resta in ' + dest };
+
+    log('avvio installer ' + dest);
+    const installer = spawn(dest, [], { detached: true, stdio: 'ignore' });
+    installer.unref();
+    shuttingDown = true; // l'installer deve poter sostituire i file: si esce senza passare dal logout
+    setTimeout(() => app.exit(0), 1000);
+    return { ok: true, message: 'Installer avviato, il programma si chiude.' };
+  } catch (e) {
+    log('aggiornamento fallito: ' + e.message);
+    return { ok: false, message: 'Aggiornamento fallito: ' + e.message };
+  }
 });
 
 ipcMain.on('window:close', (event) => {
@@ -540,6 +714,7 @@ async function createWindows() {
   registraScorciatoie();
   armaRefreshProgrammato();
   aggiornaBloccoStandby();
+  ascoltaCambiDisplay();
   log('avviato, versione ' + app.getVersion());
 }
 

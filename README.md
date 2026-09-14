@@ -30,7 +30,7 @@ Data di build della 1.6.4: **2026-02-03**.
 
 ## Requisiti
 
-- Node.js 18+ (consigliato 20 LTS)
+- Node.js 22+ (la CI usa la 22)
 - Windows x64 per il target NSIS
 
 ```bash
@@ -73,12 +73,18 @@ File: `%APPDATA%\unifi-protect-monitor\viste_config.json`
 
 ```json
 {
-  "passwordApp": "…",
+  "passwordHash": "…64 caratteri esadecimali…",
+  "passwordSalt": "…32 caratteri esadecimali…",
   "avvioFullScreen": false,
-  "autoReboot": true,
+  "autoReboot": false,
   "oraReboot": "03:00",
+  "impedisciStandby": true,
   "logoutOnExit": true,
   "logoutOnStart": true,
+  "accettaTuttiICertificati": false,
+  "riallineaSuCambioDisplay": true,
+  "accelerazioneHardware": true,
+  "repoAggiornamenti": "tonym961/VProtect",
   "viste": {
     "0": { "url": "https://…", "nome": "Registrazioni", "attiva": true },
     "1": { "url": "https://…", "nome": "Vista 1", "attiva": true }
@@ -86,15 +92,33 @@ File: `%APPDATA%\unifi-protect-monitor\viste_config.json`
 }
 ```
 
-## Note tecniche note
+Il file viene scritto in modo atomico (tmp → `fsync` → `rename`). Se risulta illeggibile all'avvio
+viene rinominato in `viste_config.json.corrupt-<timestamp>` e segnalato con un dialog, invece di
+essere sovrascritto in silenzio con i valori di fabbrica.
 
-- `--ignore-certificate-errors` è applicato a tutto il processo per accettare i certificati
-  self-signed dei controller UniFi. Va ristretto al solo host configurato (vedi roadmap).
-- La password del programma è salvata in chiaro nel JSON.
-- `oraReboot` / `autoReboot` sono salvati e mostrati nella UI ma **non** schedulano ancora nulla.
-- `wallpaper.html`, `wallpaper.png` e `icona1.ico` non sono referenziati da `main.js`.
+`passwordApp` era il campo in chiaro fino alla 1.7.x: viene convertito in `passwordHash` +
+`passwordSalt` al primo avvio della 1.8.0 e rimosso dal file.
 
-Questi punti sono tracciati nella roadmap di miglioramento.
+## Note tecniche
+
+- I certificati self-signed sono accettati **solo** dagli host elencati nelle viste. Ogni rifiuto
+  finisce in `monitor.log`. La casella *"Accetta certificati non validi da qualsiasi indirizzo"*
+  ripristina il comportamento permissivo dove serve (redirect, reverse proxy).
+- Le finestre di servizio (password, impostazioni) girano con `nodeIntegration: false`,
+  `contextIsolation: true`, `sandbox: true` e CSP `default-src 'none'`. La finestra che carica il
+  controller non ha preload, quindi non ha alcun canale verso il main process.
+- Log in `%APPDATA%\unifi-protect-monitor\monitor.log`, rotazione a 1 MB.
+- `icona1.ico` non è referenziato dal codice: resta impacchettato come asset storico.
+  `wallpaper.html` / `wallpaper.png` sono la schermata mostrata quando il controller è irraggiungibile.
+
+## Test
+
+```bash
+npm test           # 27 asserzioni sulle finestre di servizio, in finestre nascoste
+npm run test:avvio # avvia il main process in una userData temporanea e ne verifica il log
+```
+
+Girano entrambi in CI prima del packaging, insieme a `node --check` su tutti i sorgenti.
 
 
 ## Build automatica
@@ -102,9 +126,30 @@ Questi punti sono tracciati nella roadmap di miglioramento.
 Il workflow [.github/workflows/build.yml](.github/workflows/build.yml) compila l'installer NSIS su un
 runner Windows di GitHub, quindi non serve avere Node.js sul PC locale.
 
-- **Release**: `git tag v1.7.0 && git push origin v1.7.0` → compila e allega `UniFi_Monitor_1.7.0.exe`
+- **Release**: `git tag v1.9.0 && git push origin v1.9.0` → compila e allega `UniFi_Monitor_1.9.0.exe`
   alla release del tag.
 - **Prova**: Actions → "Build installer" → *Run workflow* → l'exe resta come artifact per 90 giorni.
+
+## Aggiornamento
+
+Dalle impostazioni, riquadro *Aggiornamenti*: **Controlla aggiornamenti** interroga le release di
+questo repository e, se ce n'è una più recente, **Scarica e installa** scarica l'installer con barra
+di avanzamento e lo lancia. Non serve passare dal browser.
+
+Nessun controllo automatico in background: parte solo da un click. Il download accetta solo HTTPS
+verso gli host delle release GitHub, verifica che il file sia davvero un eseguibile e chiede conferma
+prima di lanciarlo (Windows chiederà i permessi di amministratore).
+
+## Cambio di monitor
+
+Passando da DisplayPort a HDMI (o viceversa) il programma aspetta 2 secondi che la raffica di eventi
+si assesti, riporta la finestra sul monitor corrente e **ricarica la vista** — quest'ultimo passo
+serve perché l'interfaccia di Protect calcola la griglia delle camere al caricamento e non si
+riadatta da sola.
+
+Se lo sfarfallio persiste, nelle impostazioni si può togliere l'accelerazione hardware (effetto al
+riavvio del programma). Ogni cambio di display finisce in `monitor.log` con risoluzione e fattore di
+scala.
 
 ## Roadmap
 

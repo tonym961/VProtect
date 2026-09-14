@@ -21,7 +21,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
 
       # package-lock.json e' versionato: npm ci installa le versioni esatte del lock,
       # cosi' la build e' riproducibile e non cambia sotto i piedi a ogni patch release.
@@ -37,6 +37,11 @@ jobs:
       # preload, CSP, rendering e validazione degli URL prima di impacchettare.
       - name: Test delle finestre di servizio
         run: npm test
+
+      # Avvia il main process vero in una userData temporanea e controlla dal log che l'avvio
+      # arrivi in fondo e che il recupero da host irraggiungibile scatti.
+      - name: Test di avvio del main process
+        run: npm run test:avvio
 
       - name: Compila l'installer NSIS
         run: npx electron-builder --win nsis --x64 --publish never

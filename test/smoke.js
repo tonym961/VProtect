@@ -25,10 +25,12 @@ for (let i = 0; i <= 9; i++) {
 ipcMain.handle('settings:get', () => ({
   viste: visteFinte, avvioFullScreen: false, autoReboot: true, oraReboot: '03:00',
   impedisciStandby: true, logoutOnExit: true, logoutOnStart: true,
-  accettaTuttiICertificati: false, versione: '0.0.0-test'
+  accettaTuttiICertificati: false, riallineaSuCambioDisplay: true, accelerazioneHardware: false,
+  versione: '0.0.0-test'
 }));
 ipcMain.handle('auth:check', (e, v) => v === 'segreto');
 ipcMain.handle('settings:save', (e, d) => ({ ok: true, message: 'salvato:' + Object.keys(d.viste).length }));
+ipcMain.handle('update:check', () => ({ ok: true, aggiornamento: true, versione: '9.9.9', message: 'Disponibile la versione 9.9.9' }));
 
 const aperte = [];
 
@@ -39,7 +41,8 @@ async function apri(file) {
     webPreferences: { preload: path.join(PROJ, 'preload.js'), nodeIntegration: false, contextIsolation: true, sandbox: true }
   });
   aperte.push(win);
-  win.webContents.on('console-message', (e, level, message) => { messaggi.push(message); });
+  // Da Electron 35 l'evento passa un oggetto: la vecchia forma posizionale e' deprecata.
+  win.webContents.on('console-message', (evento) => { messaggi.push(evento.message); });
   await win.loadFile(path.join(PROJ, file));
   await new Promise(r => setTimeout(r, 900)); // lascia completare il carica() asincrono
   return { win, messaggi, js: (codice) => win.webContents.executeJavaScript(codice) };
@@ -49,7 +52,7 @@ app.whenReady().then(async () => {
   const p = await apri('password.html');
   ok('password: window.api esposto', await p.js('typeof window.api'), 'object');
   ok('password: Node non raggiungibile', await p.js('typeof window.require'), 'undefined');
-  ok('password: superficie api limitata', await p.js('Object.keys(window.api).length'), 9);
+  ok('password: superficie api limitata', await p.js('Object.keys(window.api).length'), 12);
   ok('password: password giusta accettata', await p.js("window.api.verificaPassword('segreto')"), true);
   ok('password: password sbagliata rifiutata', await p.js("window.api.verificaPassword('altro')"), false);
   ok('password: Invio invia il form', await p.js("(() => { const c=document.getElementById('pass'); c.value='x'; c.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter'})); return true })()"), true);
@@ -72,6 +75,15 @@ app.whenReady().then(async () => {
 
   ok('settings: URL non valido bloccato', await s.js("(async () => { const u=document.querySelectorAll('.v-url')[0]; u.value='javascript:alert(1)'; document.getElementById('salva').click(); await new Promise(r=>setTimeout(r,200)); return document.getElementById('esito').className })()"), 'ko');
   ok('settings: URL valido accettato', await s.js("(async () => { const u=document.querySelectorAll('.v-url')[0]; u.value='https://10.0.0.99/'; document.getElementById('salva').click(); await new Promise(r=>setTimeout(r,300)); return document.getElementById('esito').className })()"), 'ok');
+  ok('settings: riallinea display letto', await s.js('document.getElementById("riallinea").checked'), true);
+  ok('settings: accelerazione hardware letta', await s.js('document.getElementById("accelerazione").checked'), false);
+
+  // aggiornamenti: il bottone di installazione resta disabilitato finche' il controllo non trova qualcosa
+  ok('settings: installa disabilitato prima del controllo', await s.js('document.getElementById("installa").disabled'), true);
+  ok('settings: versione corrente mostrata', await s.js('document.getElementById("versioneCorrente").textContent'), '0.0.0-test');
+  ok('settings: controllo abilita l\'installazione', await s.js("(async () => { document.getElementById('controlla').click(); await new Promise(r=>setTimeout(r,400)); return document.getElementById('installa').disabled })()"), false);
+  ok('settings: esito del controllo mostrato', await s.js("document.getElementById('esito').textContent"), 'Disponibile la versione 9.9.9');
+
   ok('settings: nessun errore in console', s.messaggi, []);
 
   console.log('\n' + esiti.join('\n'));

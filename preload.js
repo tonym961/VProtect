@@ -17,5 +17,13 @@ contextBridge.exposeInMainWorld('api', {
   svuotaCache: () => ipcRenderer.invoke('settings:clear-cache'),
   disconnettiAccount: () => ipcRenderer.invoke('settings:logout'),
 
+  // --- aggiornamento manuale ---
+  controllaAggiornamenti: () => ipcRenderer.invoke('update:check'),
+  installaAggiornamento: () => ipcRenderer.invoke('update:install'),
+  suProgressoAggiornamento: (callback) => {
+    ipcRenderer.removeAllListeners('update:progress');
+    ipcRenderer.on('update:progress', (evento, percentuale) => callback(percentuale));
+  },
+
   chiudi: () => ipcRenderer.send('window:close')
 });

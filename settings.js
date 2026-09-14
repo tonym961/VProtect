@@ -73,7 +73,10 @@ async function carica() {
   document.getElementById('loExit').checked = !!cfg.logoutOnExit;
   document.getElementById('loStart').checked = !!cfg.logoutOnStart;
   document.getElementById('certTutti').checked = !!cfg.accettaTuttiICertificati;
+  document.getElementById('riallinea').checked = !!cfg.riallineaSuCambioDisplay;
+  document.getElementById('accelerazione').checked = !!cfg.accelerazioneHardware;
   document.getElementById('versione').textContent = 'v' + cfg.versione;
+  document.getElementById('versioneCorrente').textContent = cfg.versione;
 }
 
 document.getElementById('salva').addEventListener('click', async () => {
@@ -91,9 +94,45 @@ document.getElementById('salva').addEventListener('click', async () => {
     oraReboot: document.getElementById('ora').value,
     logoutOnExit: document.getElementById('loExit').checked,
     logoutOnStart: document.getElementById('loStart').checked,
-    accettaTuttiICertificati: document.getElementById('certTutti').checked
+    accettaTuttiICertificati: document.getElementById('certTutti').checked,
+    riallineaSuCambioDisplay: document.getElementById('riallinea').checked,
+    accelerazioneHardware: document.getElementById('accelerazione').checked
   });
   mostraEsito(res.message, res.ok);
+});
+
+// --- aggiornamenti ---
+const bottoneInstalla = document.getElementById('installa');
+const barra = document.getElementById('barra');
+const avanzamento = document.getElementById('avanzamento');
+
+window.api.suProgressoAggiornamento((pct) => {
+  barra.style.display = 'block';
+  avanzamento.style.width = pct + '%';
+  bottoneInstalla.textContent = 'Scarico… ' + pct + '%';
+});
+
+document.getElementById('controlla').addEventListener('click', async () => {
+  const bottone = document.getElementById('controlla');
+  bottone.disabled = true;
+  bottone.textContent = '🔍 Controllo…';
+  const res = await window.api.controllaAggiornamenti();
+  mostraEsito(res.message, res.ok);
+  bottoneInstalla.disabled = !(res.ok && res.aggiornamento);
+  bottone.disabled = false;
+  bottone.textContent = '🔍 Controlla aggiornamenti';
+});
+
+bottoneInstalla.addEventListener('click', async () => {
+  bottoneInstalla.disabled = true;
+  bottoneInstalla.textContent = 'Scarico…';
+  const res = await window.api.installaAggiornamento();
+  mostraEsito(res.message, res.ok);
+  if (!res.ok) {
+    bottoneInstalla.disabled = false;
+    bottoneInstalla.textContent = '⬇️ Scarica e installa';
+    barra.style.display = 'none';
+  }
 });
 
 document.getElementById('cambiaPwd').addEventListener('click', async () => {

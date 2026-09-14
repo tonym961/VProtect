@@ -1,5 +1,51 @@
 # Changelog
 
+## 1.9.0 — Electron 44, cambio monitor, aggiornamento dall'app
+
+**Electron 28.3.3 → 44.3.0** (Chromium 120 → 144)
+
+La 28 era del 2024: due anni di patch di sicurezza Chromium mancanti, su un'app il cui lavoro è
+decodificare flussi video. La 44 è la major `latest` e resta supportata più a lungo.
+Cambiamenti necessari trovati **dai test**, non a mano:
+
+- `webContents.on('console-message')` passa ora un oggetto evento; la forma posizionale è
+  deprecata. Aggiornato in `test/smoke.js`.
+- Rimosso l'attributo `autofocus` da `password.html`: Chromium 144 logga *"Autofocus processing
+  was blocked because a document already has a focused element"*. Il focus lo mette `password.js`.
+- Verificato sul campo: avvio completo, migrazione password, recupero da host irraggiungibile e
+  nessuna deprecazione su stderr (`npm run test:avvio`).
+
+**Cambio di uscita video (DisplayPort ↔ HDMI)**
+
+Passando da un'uscita all'altra la finestra restava dimensionata sul monitor precedente e la
+griglia di Protect non si riadattava, con sfarfallio durante il passaggio.
+
+- Nuovo `riallineaAlDisplay()`: ascolta `display-added`, `display-removed` e
+  `display-metrics-changed`, aspetta 2 secondi che la raffica di eventi si assesti, riporta la
+  finestra sul monitor corrente, rifà il fullscreen e **ricarica la vista** — quest'ultimo è il
+  passo che fa ricalcolare la griglia, perché Protect la dimensiona al caricamento.
+- Opzione *"Riadatta la finestra quando cambia l'uscita video"*, attiva di default.
+- Via di fuga: *"Accelerazione hardware"* disattivabile dalle impostazioni. Se lo sfarfallio
+  resta anche dopo il riadattamento, la decodifica passa alla CPU e il compositore video non
+  viene più reinizializzato. Ha effetto al riavvio del programma.
+- Ogni cambio di display finisce in `monitor.log` con risoluzione e fattore di scala, così se il
+  problema persiste si vede cosa è successo.
+
+**Aggiornamento manuale dalle impostazioni**
+
+- Nuovo riquadro *Aggiornamenti*: `🔍 Controlla aggiornamenti` interroga le release di
+  `tonym961/VProtect`, confronta con la versione installata e, se c'è di nuovo,
+  `⬇️ Scarica e installa` scarica l'installer con barra di avanzamento e lo lancia.
+- Nessuna dipendenza runtime aggiunta (solo il modulo `https` di Node) e **nessun controllo
+  automatico in background**: parte solo da un click.
+- Il download accetta solo HTTPS e solo gli host delle release GitHub, segue al massimo 5
+  redirect, verifica che il file scaricato inizi con `MZ` (è un eseguibile, non una pagina di
+  errore salvata) e chiede conferma esplicita prima di lanciarlo.
+
+**Test**
+
+27 asserzioni sulle finestre di servizio + 8 controlli sull'avvio reale del main process.
+
 ## 1.8.0 — refactor di sicurezza
 
 Secondo blocco della [ROADMAP.md](ROADMAP.md). Cambia la struttura, non l'aspetto: le finestre

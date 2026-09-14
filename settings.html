@@ -65,6 +65,26 @@
     <div class="nota">Lasciandola deselezionata i certificati self-signed vengono accettati solo dagli host elencati nelle viste qui sopra. Spuntala solo se il controller risponde su un indirizzo diverso da quelli configurati (redirect, reverse proxy) — i rifiuti finiscono comunque in monitor.log.</div>
   </div>
 
+  <div class="riquadro">
+    <h4>🖥 Video e monitor</h4>
+    <label style="display:block; margin-bottom:6px;"><input type="checkbox" id="riallinea"> Riadatta la finestra quando cambia l'uscita video</label>
+    <div class="nota">Passando da DisplayPort a HDMI la finestra resta dimensionata sul monitor precedente e la griglia di Protect non si riadatta da sola. Con questa attiva il programma aspetta che il cambio si assesti, riporta la finestra sul monitor giusto e ricarica la vista.</div>
+    <label style="display:block; margin-bottom:6px;"><input type="checkbox" id="accelerazione"> Accelerazione hardware</label>
+    <div class="nota">Se lo sfarfallio resta anche dopo il riadattamento, togli la spunta: la decodifica passa alla CPU (più carico, ma il compositore video non viene più reinizializzato). Ha effetto al riavvio del programma.</div>
+  </div>
+
+  <div class="riquadro">
+    <h4>⬆️ Aggiornamenti</h4>
+    <div class="nota" id="statoAggiornamento">Versione installata: <span id="versioneCorrente">…</span></div>
+    <div style="display:flex; gap:10px;">
+      <button id="controlla" style="flex:1; background:#337ab7;">🔍 Controlla aggiornamenti</button>
+      <button id="installa" style="flex:1; background:#5cb85c;" disabled>⬇️ Scarica e installa</button>
+    </div>
+    <div id="barra" style="display:none; margin-top:10px; background:#e0e0e0; border-radius:4px; height:18px; overflow:hidden;">
+      <div id="avanzamento" style="width:0%; height:100%; background:#5cb85c; transition:width .2s;"></div>
+    </div>
+  </div>
+
   <div class="riquadro grigio bottoniera">
     <button id="backup">📤 Backup</button>
     <button id="restore">📥 Restore</button>
