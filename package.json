@@ -17,6 +17,7 @@
     "appId": "com.iotatau.unifi-protect-monitor",
     "copyright": "Copyright © 2026 Iotatau",
     "asar": true,
+    "publish": null,
     "files": [
       "main.js",
       "splash.html",
