@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="UTF-8">
+<title>Caricamento...</title>
+<style>
+  body {
+    /* Colore di sfondo dello splash screen (es. grigio scuro) */
+    background-color: #2c3e50; 
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    height: 100vh;
+    margin: 0;
+    overflow: hidden; /* Nasconde barre di scorrimento */
+  }
+  #logo {
+    /* Dimensione del logo (modifica se serve) */
+    width: 300px; 
+    height: auto;
+    /* Un piccolo effetto di pulsazione elegante */
+    animation: pulse 2s infinite;
+  }
+  @keyframes pulse {
+    0% { transform: scale(1); opacity: 1; }
+    50% { transform: scale(1.05); opacity: 0.8; }
+    100% { transform: scale(1); opacity: 1; }
+  }
+</style>
+</head>
+<body>
+  <img id="logo" src="logo.png" alt="Logo Aziendale">
+</body>
+</html>

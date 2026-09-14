@@ -1,0 +1,57 @@
+{
+  "name": "unifi-protect-monitor",
+  "version": "1.6.4",
+  "description": "Client UniFi Protect - Fix Codec Misti e UI Completa",
+  "author": "Iotatau",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder --win nsis --x64",
+    "pack": "electron-builder --dir"
+  },
+  "devDependencies": {
+    "electron": "28.3.3",
+    "electron-builder": "^24.13.3"
+  },
+  "build": {
+    "appId": "com.iotatau.unifi-protect-monitor",
+    "copyright": "Copyright © 2026 Iotatau",
+    "asar": true,
+    "files": [
+      "main.js",
+      "splash.html",
+      "wallpaper.html",
+      "logo.png",
+      "wallpaper.png",
+      "icona.ico",
+      "icona1.ico",
+      "package.json"
+    ],
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "icona.ico"
+    },
+    "nsis": {
+      "artifactName": "UniFi_Monitor_${version}.${ext}",
+      "oneClick": false,
+      "perMachine": true,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "UniFi Protect Monitor",
+      "installerIcon": "icona.ico",
+      "uninstallerIcon": "icona.ico"
+    }
+  }
+}
